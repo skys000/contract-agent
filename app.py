@@ -345,9 +345,9 @@ with tab_audit:
                         db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
                         try:
                             # 将完整的合同文本传入，底层机制已重构为段落切分、多路召回与合并去重
-                            retrieved_laws = query_laws(clean_text, db_dir, top_k=5)
-                        except Exception:
-                            retrieved_laws = "《中华人民共和国劳动合同法》第十九条：试用期规定..."
+                            retrieved_laws = query_laws(clean_text, db_dir, top_k=10)
+                        except Exception as ex:
+                            retrieved_laws = f"【RAG 检索失败】未能从本地 FAISS 法律知识库召回可靠依据。错误信息：{ex}"
                             
                         # 2. 构造 LangGraph 双智能体状态输入
                         inputs = {
