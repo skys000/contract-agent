@@ -156,9 +156,11 @@ def extract_metadata(text: str) -> dict:
         r'(?:基本工资|基本薪酬)[为是]\s*(\d+)\s*(?:元|元/月)'
     ]
     for pattern in salary_patterns:
-        match = re.search(pattern, text)
-        if match:
-            metadata["salary"] = f"{match.group(1)} 元/月"
+        matches = re.findall(pattern, text)
+        if matches:
+            # 去重并保持先后顺序
+            unique_matches = list(dict.fromkeys(matches))
+            metadata["salary"] = " / ".join(unique_matches) + " 元/月"
             break
             
     return metadata
