@@ -141,8 +141,8 @@ def extract_metadata(text: str) -> dict:
                 
     # 3. 匹配合同期限
     duration_patterns = [
-        r'合同期限(?:为|是|自)\s*([^\n，。；]+)',
-        r'期限为\s*([^\n，。；]+)'
+        r'合同期(?:限)?(?:为|是|自)\s*([^\n，。；]+)',
+        r'期限(?:为|是|自)\s*([^\n，。；]+)'
     ]
     for pattern in duration_patterns:
         match = re.search(pattern, text)
@@ -152,7 +152,7 @@ def extract_metadata(text: str) -> dict:
             
     # 4. 匹配薪资额度
     salary_patterns = [
-        r'(?:工资|薪资|报酬)为\s*(?:每月|人民币)?\s*(\d+)\s*(?:元|元/月)',
+        r'(?:工资|薪资|报酬|底薪)[^，。；\n]*?(?:为|是)[^\d，。；\n]*?(\d+)\s*(?:元|元/月)',
         r'(?:基本工资|基本薪酬)[为是]\s*(\d+)\s*(?:元|元/月)'
     ]
     for pattern in salary_patterns:
