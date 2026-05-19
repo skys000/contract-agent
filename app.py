@@ -11,6 +11,7 @@ import os
 import sys
 import matplotlib.pyplot as plt
 import numpy as np
+import base64
 from dotenv import load_dotenv
 
 # 将 src 目录临时加入模块查找路径
@@ -240,7 +241,17 @@ with tab_audit:
     
     st.markdown("<br>", unsafe_allow_html=True)
     
+    # 初始化审计结果会话状态以支持一键导出下载（避免 Streamlit 刷新导致下载失败）
+    if "audit_result" not in st.session_state:
+        st.session_state["audit_result"] = None
+    if "current_file" not in st.session_state:
+        st.session_state["current_file"] = None
+
     if uploaded_file is not None:
+        if st.session_state["current_file"] != uploaded_file.name:
+            st.session_state["audit_result"] = None
+            st.session_state["current_file"] = uploaded_file.name
+            
         # 建立缓冲区存放临时处理文件
         temp_dir = os.path.join(os.path.dirname(__file__), "data", "temp")
         os.makedirs(temp_dir, exist_ok=True)
@@ -362,14 +373,6 @@ with tab_audit:
                                 unsafe_allow_html=True
                             )
                             
-                            status_box.markdown(
-                                "<div style='color:#34c759; font-size:13px; font-weight:600; margin: 10px 0;'>🎉 [4/4] 审查完成！以下为联合生成的《合规智能会审报告》：</div>", 
-                                unsafe_allow_html=True
-                            )
-                            
-                            st.markdown("### 📄 智能合规审查报告")
-                            st.markdown(result["final_report"])
-                            
                             # 4. 解析风险统计并持久化入库
                             raw_audit_text = result.get("raw_audit", "")
                             risk_high_cnt = raw_audit_text.count("高风险")
@@ -383,31 +386,62 @@ with tab_audit:
                                 risk_med=risk_med_cnt
                             )
                             
-                            # 5. 导出下载按钮
-                            st.markdown("---")
-                            st.download_button(
-                                label="💾 一键导出合规审查报告 (Markdown格式)",
-                                data=result["final_report"],
-                                file_name=f"劳动合同合规审查报告_{uploaded_file.name.split('.')[0]}.md",
-                                mime="text/markdown",
-                                use_container_width=True
-                            )
+                            # 将结果保存至会话状态
+                            st.session_state["audit_result"] = {
+                                "report": result["final_report"],
+                                "filename": uploaded_file.name
+                            }
+                            
+                            status_box.empty()
                             
                         except Exception as ex:
                             st.error(f"双智能体调用失败，请检查网络或 DeepSeek API 密钥。错误: {ex}")
+                            
+                    # 判断会话状态中是否有已生成的审计报告，若有则持续渲染（避免由于 Streamlit 重新运行导致的下载中断）
+                    if st.session_state["audit_result"] is not None:
+                        report_data = st.session_state["audit_result"]
+                        st.markdown("<div style='color:#34c759; font-size:13px; font-weight:600; margin: 10px 0;'>🎉 审查完成！以下为联合生成的《合规智能会审报告》：</div>", unsafe_allow_html=True)
+                        st.markdown("### 📄 智能合规审查报告")
+                        st.markdown(report_data["report"])
+                        
+                        # 5. 导出下载按钮（使用基于 Base64 的原生 HTML 下载链接，彻底绕过 Streamlit 下载拦截与 UUID 后缀 Bug）
+                        st.markdown("---")
+                        
+                        # 恢复并组合包含原合同名称的高辨识度中文文件名
+                        export_filename = f"劳动合同合规审查报告_{report_data['filename'].split('.')[0]}.md"
+                        
+                        # 将 Markdown 报告字符串转为基于 utf-8 的 Base64 数据流
+                        b64_report = base64.b64encode(report_data["report"].encode("utf-8")).decode()
+                        
+                        # 构造纯前端下载锚点标签，利用浏览器原生下载属性 (download) 实现极速导出，UI 与 Streamlit 次级按钮保持 100% 视觉一致
+                        download_href = f'''
+                        <a href="data:text/markdown;charset=utf-8;base64,{b64_report}" download="{export_filename}"
+                           style="display: block; width: 100%; text-align: center; background-color: #ffffff; 
+                                  color: #1d1d1f; border: 1px solid #d2d2d7; padding: 10px 0; 
+                                  border-radius: 8px; text-decoration: none; font-weight: 600; 
+                                  font-size: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);">
+                           💾 一键导出合规审查报告 (Markdown格式)
+                        </a>
+                        '''
+                        st.markdown(download_href, unsafe_allow_html=True)
                     else:
-                        # 激活状态等待提示
-                        st.markdown("""
-                        <div style="text-align: center; padding: 40px 10px; color: #86868b;">
-                            <div style="font-size: 24px; margin-bottom: 8px;">⚖️</div>
-                            <div style="font-size: 13px;">点击上方按钮，启动双智能体反思协同会审</div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        if not run_audit:
+                            # 激活状态等待提示
+                            st.markdown("""
+                            <div style="text-align: center; padding: 40px 10px; color: #86868b;">
+                                <div style="font-size: 24px; margin-bottom: 8px;">⚖️</div>
+                                <div style="font-size: 13px;">点击上方按钮，启动双智能体反思协同会审</div>
+                            </div>
+                            """, unsafe_allow_html=True)
                 
         # 物理清理本地缓存
         if os.path.exists(temp_path):
             os.remove(temp_path)
     else:
+        # 重置审计会话状态
+        st.session_state["audit_result"] = None
+        st.session_state["current_file"] = None
+        
         # 清爽优雅的空置首屏引导区 (Onboard State)
         st.markdown("""
         <div style="text-align: center; padding: 70px 20px; color: #86868b; background-color: #ffffff; border-radius: 12px; border: 1px dashed #d2d2d7;">
