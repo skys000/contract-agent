@@ -44,11 +44,13 @@ st.markdown("""
         visibility: hidden;
     }
     
-    /* 容器间距微调 */
+    /* 容器间距微调，宽度拉满避免两侧留空 */
     .block-container {
         padding-top: 1.5rem !important;
         padding-bottom: 2rem !important;
-        max-width: 1200px !important;
+        padding-left: 2.5rem !important;
+        padding-right: 2.5rem !important;
+        max-width: 100% !important;
     }
 
     /* 全局背景色与高对比文本基调 */
@@ -95,6 +97,19 @@ st.markdown("""
         color: #1d1d1f !important;
         font-family: monospace !important;
         font-size: 13px !important;
+    }
+    /* 强力覆盖 disabled 文本域字体颜色与透明度，确保高对比可读性 */
+    textarea:disabled {
+        color: #1d1d1f !important;
+        -webkit-text-fill-color: #1d1d1f !important;
+        opacity: 1 !important;
+        background-color: #f5f5f7 !important;
+    }
+    /* 强力覆盖所有输入控件的 label 属性，确保高对比度 */
+    .stTextArea label, .stTextInput label, .stFileUploader label {
+        color: #1d1d1f !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
     }
     
     /* 列表与活动流表格样式苹果化 */
