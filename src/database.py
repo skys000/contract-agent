@@ -164,10 +164,11 @@ def get_monthly_risk_stats() -> Tuple[List[str], List[int], List[int]]:
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    # 修复图表数据不动 Bug：获取最新 10 条数据，防止始终只查前 10 条
     cursor.execute("""
-    SELECT filename, risk_count_high, risk_count_med
+    SELECT id, filename, risk_count_high, risk_count_med
     FROM audit_logs
-    ORDER BY id ASC
+    ORDER BY id DESC
     LIMIT 10
     """)
     
@@ -178,10 +179,13 @@ def get_monthly_risk_stats() -> Tuple[List[str], List[int], List[int]]:
     high_counts = []
     med_counts = []
     
-    for row in rows:
-        # 只截取文件名的前 10 个字符显示，防止图表标签太长重叠
+    # 逆序遍历，使得图表从左到右代表时间推进
+    for row in reversed(rows):
+        # 截短文件名，并带上 #ID 作为独立区分标识，防止多次测试同一个文件导致标签重复死板
         short_name = row["filename"][:10] + "..." if len(row["filename"]) > 10 else row["filename"]
-        filenames.append(short_name)
+        label = f"{short_name}\n(#{row['id']})"
+        
+        filenames.append(label)
         high_counts.append(row["risk_count_high"])
         med_counts.append(row["risk_count_med"])
         
