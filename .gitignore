@@ -8,3 +8,5 @@ db/
 *.doc
 *.pyc
 .DS_Store
+data/*.db
+data/temp/

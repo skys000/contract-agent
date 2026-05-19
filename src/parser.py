@@ -5,6 +5,7 @@
 """
 
 import os
+import re
 from docx import Document
 import pypdf
 
@@ -80,3 +81,82 @@ def extract_contract_text(file_path: str) -> str:
     else:
         # 对不支持的非法扩展名进行强拦截
         raise ValueError(f"系统不支持的文件格式: {file_extension}。请上传 .docx 或 .pdf 合同文档。")
+
+def desensitize_text(text: str) -> str:
+    """
+    根据 SRS 5.3 节的隐私安全规定，对文本中的敏感信息进行本地正则脱敏替换
+    :param text: 原始合同文本
+    :return: 脱敏后的文本，敏感数据已被替换为占位符
+    """
+    # 1. 匹配 18 位身份证号码
+    id_pattern = r'\d{17}[\dXx]'
+    text = re.sub(id_pattern, "[USER_ID]", text)
+    
+    # 2. 匹配 11 位手机号码（限制前后不为数字，防止错切其他编号）
+    phone_pattern = r'(?<!\d)1[3-9]\d{9}(?!\d)'
+    text = re.sub(phone_pattern, "[USER_PHONE]", text)
+    
+    return text
+
+def extract_metadata(text: str) -> dict:
+    """
+    利用启发式正则表达式规则从合同文本中提取关键元数据（甲方、乙方等）
+    :param text: 合同全文文本
+    :return: 包含元数据字典
+    """
+    metadata = {
+        "party_a": "未知用人单位",
+        "party_b": "未知劳动者",
+        "duration": "未知期限",
+        "salary": "未明确约定"
+    }
+    
+    # 1. 匹配 甲方 (用人单位)
+    party_a_patterns = [
+        r'(?:甲方|用人单位)\s*[:：\(（\s]*(.*?公司|.*?集团|.*?厂|.*?店|.*?医院|.*?学校|.*?局)',
+        r'(?:甲方|用人单位)\s*[:：\(（\s]*([^\n，。；]+)'
+    ]
+    for pattern in party_a_patterns:
+        match = re.search(pattern, text)
+        if match:
+            val = match.group(1).strip()
+            if len(val) >= 4 and not val.startswith("劳动者") and not val.startswith("乙方"):
+                metadata["party_a"] = val
+                break
+                
+    # 2. 匹配 乙方 (劳动者)
+    party_b_patterns = [
+        r'(?:乙方|劳动者)\s*[:：\(（\s]*([\u4e00-\u9fa5]{2,4})(?:\s|[,，。；\n]|$)'
+    ]
+    for pattern in party_b_patterns:
+        match = re.search(pattern, text)
+        if match:
+            val = match.group(1).strip()
+            if val and not val.startswith("用人"):
+                metadata["party_b"] = val
+                break
+                
+    # 3. 匹配合同期限
+    duration_patterns = [
+        r'合同期限(?:为|自)(.*?)(?:起|止|年|月|日|，|。)',
+        r'期限为\s*([^\n，。；]+)'
+    ]
+    for pattern in duration_patterns:
+        match = re.search(pattern, text)
+        if match:
+            metadata["duration"] = match.group(1).strip()
+            break
+            
+    # 4. 匹配薪资额度
+    salary_patterns = [
+        r'(?:工资|薪资|报酬)为\s*(?:每月|人民币)?\s*(\d+)\s*(?:元|元/月)',
+        r'(?:基本工资|基本薪酬)[为是]\s*(\d+)\s*(?:元|元/月)'
+    ]
+    for pattern in salary_patterns:
+        match = re.search(pattern, text)
+        if match:
+            metadata["salary"] = f"{match.group(1)} 元/月"
+            break
+            
+    return metadata
+
