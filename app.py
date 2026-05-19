@@ -344,7 +344,8 @@ with tab_audit:
                         )
                         db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
                         try:
-                            retrieved_laws = query_laws(clean_text[:400], db_dir, top_k=3)
+                            # 将完整的合同文本传入，底层机制已重构为段落切分、多路召回与合并去重
+                            retrieved_laws = query_laws(clean_text, db_dir, top_k=5)
                         except Exception:
                             retrieved_laws = "《中华人民共和国劳动合同法》第十九条：试用期规定..."
                             

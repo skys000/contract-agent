@@ -88,12 +88,13 @@ def build_law_vector_db(laws_dir: str, save_dir: str) -> None:
     db.save_local(save_dir)
     print(f"[RAG] 向量数据库构建并持久化成功！已保存至: {save_dir}")
 
-def query_laws(query: str, db_dir: str, top_k: int = 3) -> str:
+def query_laws(query: str, db_dir: str, top_k: int = 5) -> str:
     """
-    加载本地 FAISS 索引并检索与 Query 最相关的 Top-K 法条文本
+    加载本地 FAISS 索引并检索与 Query 最相关的 Top-K 法条文本。
+    采用多路段落检索 (Multi-query Retrieval) 策略以解决长文本查询向量稀释问题。
     :param query: 合同待审条款文本
     :param db_dir: 本地 FAISS 向量库索引所在目录 (data/faiss_index/)
-    :param top_k: 召回的相似条文数量，默认为 3
+    :param top_k: 召回的相似条文最大数量，默认为 5
     :return: 拼接后的格式化参考法条文本
     """
     embeddings = OpenAIEmbeddings(
@@ -108,15 +109,32 @@ def query_laws(query: str, db_dir: str, top_k: int = 3) -> str:
         raise FileNotFoundError(f"本地向量数据库未构建，未在 {db_dir} 下找到 index.faiss 文件。")
         
     # 安全加载本地向量库
-    # allow_dangerous_deserialization=True 允许反序列化本地持久化的 Pickle 索引结构
     db = FAISS.load_local(db_dir, embeddings, allow_dangerous_deserialization=True)
     
-    # 执行余弦相似度语义检索
-    results = db.similarity_search(query, k=top_k)
+    # 按照换行符切分合同文本，过滤掉过短的无意义段落（如标题、空行）
+    paragraphs = [p.strip() for p in query.split('\n') if len(p.strip()) > 15]
+    if not paragraphs:
+        paragraphs = [query]
+        
+    # 批量计算段落向量，防止循环中频繁调用 API 导致高延迟
+    paragraph_vectors = embeddings.embed_documents(paragraphs)
+    
+    unique_docs = {}
+    
+    # 对每一个实质性段落进行独立检索（每段召回 Top 2 法条）
+    for vec in paragraph_vectors:
+        results = db.similarity_search_by_vector(vec, k=2)
+        for doc in results:
+            # 使用内容本身作为键进行去重
+            if doc.page_content not in unique_docs:
+                unique_docs[doc.page_content] = doc
+                
+    # 提取前 top_k 个独立去重法条
+    final_docs = list(unique_docs.values())[:top_k]
     
     # 拼接条文及来源元数据
     formatted_references = []
-    for i, doc in enumerate(results, 1):
+    for i, doc in enumerate(final_docs, 1):
         source = doc.metadata.get("source", "未知法条来源")
         ref_text = f"【参考依据 {i}】(来源: {source})\n{doc.page_content}"
         formatted_references.append(ref_text)
