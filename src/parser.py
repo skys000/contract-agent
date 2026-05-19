@@ -113,32 +113,35 @@ def extract_metadata(text: str) -> dict:
     
     # 1. 匹配 甲方 (用人单位)
     party_a_patterns = [
-        r'(?:甲方|用人单位)\s*[:：\(（\s]*(.*?公司|.*?集团|.*?厂|.*?店|.*?医院|.*?学校|.*?局)',
-        r'(?:甲方|用人单位)\s*[:：\(（\s]*([^\n，。；]+)'
+        r'(?:甲方|用人单位)(?:\s*[\(（](?:用人单位|甲方)[\)）])?\s*[:：\s]*(.*?公司|.*?集团|.*?厂|.*?店|.*?医院|.*?学校|.*?局)',
+        r'(?:甲方|用人单位)(?:\s*[\(（](?:用人单位|甲方)[\)）])?\s*[:：\s]*([^\n，。；\s]+)'
     ]
     for pattern in party_a_patterns:
         match = re.search(pattern, text)
         if match:
             val = match.group(1).strip()
-            if len(val) >= 4 and not val.startswith("劳动者") and not val.startswith("乙方"):
+            if len(val) >= 4 and not any(kw in val for kw in ["乙方", "劳动者", "工作内容", "合同期限"]):
                 metadata["party_a"] = val
                 break
                 
     # 2. 匹配 乙方 (劳动者)
     party_b_patterns = [
-        r'(?:乙方|劳动者)\s*[:：\(（\s]*([\u4e00-\u9fa5]{2,4})(?:\s|[,，。；\n]|$)'
+        r'(?:乙方|劳动者)(?:\s*[\(（](?:劳动者|乙方)[\)）])?\s*[:：\s]*([\u4e00-\u9fa5]{2,4})(?:\s|[,，。；\n]|$)',
+        r'(?:乙方|劳动者)\s*[:：\s]*([\u4e00-\u9fa5]{2,4})(?:\s|[,，。；\n]|$)'
     ]
+    blacklist_b = ["在三年", "在合同", "在工作", "在试用", "劳动合", "用人单", "工作内", "乙方在", "劳动者", "被聘用"]
     for pattern in party_b_patterns:
-        match = re.search(pattern, text)
-        if match:
+        for match in re.finditer(pattern, text):
             val = match.group(1).strip()
-            if val and not val.startswith("用人"):
+            if val and not any(bk in val for bk in blacklist_b):
                 metadata["party_b"] = val
                 break
+        if metadata["party_b"] != "未知劳动者":
+            break
                 
     # 3. 匹配合同期限
     duration_patterns = [
-        r'合同期限(?:为|自)(.*?)(?:起|止|年|月|日|，|。)',
+        r'合同期限(?:为|是|自)\s*([^\n，。；]+)',
         r'期限为\s*([^\n，。；]+)'
     ]
     for pattern in duration_patterns:
