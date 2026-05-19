@@ -2,7 +2,7 @@
 """
 应用名: app.py
 作用: 劳动合同合规审查智能体的 Streamlit 前端交互系统与运营仪表盘大屏。
-      基于“苹果极简深空灰 (Apple Space-Gray)”美学重塑，实现信息解耦的多标签导航、
+      基于“苹果极简亮色 (Apple Light Mode)”美学重构，实现信息解耦的多标签导航、
       数据本地安全脱敏比对展示、SQLite 存盘及 RAG 法律文本检索。
 """
 
@@ -28,124 +28,157 @@ init_db()
 st.set_page_config(page_title="劳动合同合规审查智能体系统", layout="wide", page_icon="🛡️")
 
 # ==========================================
-# 1. 苹果深空灰 (Space-Gray) 极简 CSS 样式注入
+# 1. 苹果极简亮色 (Apple Light-Mode) CSS 样式注入
 # ==========================================
 st.markdown("""
 <style>
-    /* 全局背景与基本文本优化 */
+    /* 隐藏 Streamlit 头部与发布按钮，消除顶部白条缺陷 */
+    header {
+        visibility: hidden;
+        height: 0px !important;
+    }
+    .stDeployButton {
+        display: none;
+    }
+    #MainMenu {
+        visibility: hidden;
+    }
+    
+    /* 容器间距微调 */
+    .block-container {
+        padding-top: 1.5rem !important;
+        padding-bottom: 2rem !important;
+        max-width: 1200px !important;
+    }
+
+    /* 全局背景色与高对比文本基调 */
     .stApp {
-        background-color: #161617;
-        color: #f5f5f7;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background-color: #f5f5f7;
+        color: #1d1d1f;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Icons", "Helvetica Neue", Helvetica, Arial, sans-serif;
     }
     
-    /* 苹果极简卡片 */
-    .apple-card {
-        background-color: #252526;
-        border-radius: 12px;
-        border: 1px solid #424245;
-        padding: 24px;
-        margin-bottom: 20px;
-    }
-    
-    /* 标题样式（无渐变，纯苹果风） */
+    /* 自定义大标题 (无渐变) */
     .custom-title {
-        font-size: 30px;
+        font-size: 28px;
         font-weight: 700;
-        color: #f5f5f7;
+        color: #1d1d1f;
         margin-top: 10px;
-        margin-bottom: 5px;
+        margin-bottom: 4px;
         letter-spacing: -0.02em;
     }
     
     .custom-subtitle {
-        font-size: 14px;
+        font-size: 13px;
         color: #86868b;
-        margin-bottom: 24px;
+        margin-bottom: 20px;
+    }
+
+    /* 改写 Streamlit container(border=True) 样式为苹果白银卡片 */
+    div[data-testid="stVerticalBlockBorderWrapper"] {
+        background-color: #ffffff !important;
+        border: 1px solid #d2d2d7 !important;
+        border-radius: 12px !important;
+        padding: 24px !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.02) !important;
+        margin-bottom: 16px !important;
     }
     
-    /* 表格样式重塑 */
+    /* 输入框与文本域样式苹果亮色化，保证字体清晰可见 */
+    div[data-baseweb="textarea"], div[data-baseweb="input"] {
+        border-radius: 8px !important;
+        border: 1px solid #d2d2d7 !important;
+        background-color: #ffffff !important;
+        color: #1d1d1f !important;
+    }
+    textarea {
+        color: #1d1d1f !important;
+        font-family: monospace !important;
+        font-size: 13px !important;
+    }
+    
+    /* 列表与活动流表格样式苹果化 */
     .apple-table {
         width: 100%;
         border-collapse: collapse;
-        color: #f5f5f7;
+        color: #1d1d1f;
         margin-top: 8px;
     }
     .apple-table th {
-        background-color: #1d1d1f;
+        background-color: #f5f5f7;
         color: #86868b;
         text-align: left;
         padding: 12px 16px;
         font-weight: 600;
         font-size: 13px;
-        border-bottom: 1px solid #424245;
+        border-bottom: 1px solid #d2d2d7;
     }
     .apple-table td {
         padding: 12px 16px;
         font-size: 13px;
-        border-bottom: 1px solid #2d2d2f;
+        border-bottom: 1px solid #e5e5ea;
+        color: #1d1d1f;
     }
     .apple-table tr:hover {
-        background-color: #2a2a2c;
+        background-color: #fafafa;
     }
     
-    /* 风险状态扁平化徽章 */
+    /* 风险状态扁平化徽章 (高对比亮色背景) */
     .badge-high {
-        background-color: rgba(255, 69, 58, 0.15);
-        color: #ff453a;
+        background-color: rgba(255, 59, 48, 0.12);
+        color: #ff3b30;
         padding: 3px 8px;
         border-radius: 6px;
         font-size: 11px;
         font-weight: 600;
     }
     .badge-med {
-        background-color: rgba(255, 159, 10, 0.15);
-        color: #ff9f0a;
+        background-color: rgba(255, 149, 0, 0.12);
+        color: #ff9500;
         padding: 3px 8px;
         border-radius: 6px;
         font-size: 11px;
         font-weight: 600;
     }
     .badge-low {
-        background-color: rgba(48, 209, 88, 0.15);
-        color: #30d158;
+        background-color: rgba(52, 199, 89, 0.12);
+        color: #34c759;
         padding: 3px 8px;
         border-radius: 6px;
         font-size: 11px;
         font-weight: 600;
     }
     
-    /* Streamlit Tab 样式重塑为苹果扁平分段控制器 */
+    /* Streamlit Tab 样式重塑为苹果扁平胶囊分段控制器 */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #1d1d1f;
-        padding: 6px;
-        border-radius: 8px;
-        border: 1px solid #424245;
+        gap: 6px;
+        background-color: #e5e5ea;
+        padding: 4px;
+        border-radius: 9px;
+        border: none;
     }
     .stTabs [data-baseweb="tab"] {
-        height: 38px;
+        height: 34px;
         white-space: pre-wrap;
         background-color: transparent;
-        border-radius: 6px;
+        border-radius: 7px;
         color: #86868b;
         font-weight: 500;
-        font-size: 14px;
+        font-size: 13px;
         border: none;
         padding: 0 18px;
-        transition: all 0.2s ease;
+        transition: all 0.15s ease;
     }
     .stTabs [data-baseweb="tab"]:hover {
-        color: #f5f5f7;
-        background-color: rgba(255, 255, 255, 0.05);
+        color: #1d1d1f;
     }
     .stTabs [aria-selected="true"] {
-        background-color: #252526 !important;
-        color: #2f9eef !important;
+        background-color: #ffffff !important;
+        color: #0071e3 !important;
         font-weight: 600 !important;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
     }
-    /* 隐藏 tab 底线 */
+    /* 隐藏默认下划线 */
     .stTabs [data-baseweb="tab-highlight-container"] {
         display: none;
     }
@@ -153,11 +186,11 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Helper 函数：绘制苹果扁平卡片（带色边框强调）
-def render_kpi_card(title: str, value: str, subtitle: str, border_color: str = "#424245"):
+def render_kpi_card(title: str, value: str, subtitle: str, border_color: str = "#d2d2d7"):
     st.markdown(f"""
-    <div style="background-color: #252526; padding: 20px; border-radius: 12px; border: 1px solid {border_color}; color: #f5f5f7;">
-        <div style="font-size: 12px; color: #86868b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">{title}</div>
-        <div style="font-size: 28px; font-weight: 700; margin: 8px 0; color: #f5f5f7;">{value}</div>
+    <div style="background-color: #ffffff; padding: 20px; border-radius: 12px; border: 1px solid {border_color}; color: #1d1d1f; box-shadow: 0 4px 16px rgba(0,0,0,0.02);">
+        <div style="font-size: 11px; color: #86868b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">{title}</div>
+        <div style="font-size: 26px; font-weight: 700; margin: 6px 0; color: #1d1d1f;">{value}</div>
         <div style="font-size: 11px; color: #86868b; font-weight: 400;">{subtitle}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -166,7 +199,7 @@ def render_kpi_card(title: str, value: str, subtitle: str, border_color: str = "
 # 2. 顶部主标题栏
 # ==========================================
 st.markdown('<div class="custom-title">🛡️ 劳动合同合规审查智能体系统</div>', unsafe_allow_html=True)
-st.markdown('<div class="custom-subtitle">极简、安全、专业的双智能体协同合规审查系统（Space-Gray Minimalist）</div>', unsafe_allow_html=True)
+st.markdown('<div class="custom-subtitle">极简、安全、专业的双智能体协同合规审查系统（Apple Light Mode）</div>', unsafe_allow_html=True)
 
 # ==========================================
 # 3. 多页面 Tab 标签导航设计 (解耦复杂界面)
@@ -218,144 +251,143 @@ with tab_audit:
             left_col, right_col = st.columns(2)
             
             with left_col:
-                st.markdown('<div class="apple-card">', unsafe_allow_html=True)
-                st.subheader("📑 提取到的合同元数据")
-                
-                # 元数据 2x2 极简表格样式呈现
-                st.markdown(f"""
-                <table style='width:100%; border:none; color:#f5f5f7; font-size:14px; margin-bottom:15px;'>
-                    <tr>
-                        <td style='padding:8px 0; border:none; width:50%;'><span style='color:#86868b;'>甲方单位:</span> <strong style='color:#f5f5f7;'>{metadata['party_a']}</strong></td>
-                        <td style='padding:8px 0; border:none; width:50%;'><span style='color:#86868b;'>乙方姓名:</span> <strong style='color:#f5f5f7;'>{metadata['party_b']}</strong></td>
-                    </tr>
-                    <tr>
-                        <td style='padding:8px 0; border:none;'><span style='color:#86868b;'>合同期限:</span> <strong style='color:#f5f5f7;'>{metadata['duration']}</strong></td>
-                        <td style='padding:8px 0; border:none;'><span style='color:#86868b;'>约定薪资:</span> <strong style='color:#f5f5f7;'>{metadata['salary']}</strong></td>
-                    </tr>
-                </table>
-                """, unsafe_allow_html=True)
-                
-                st.markdown("---")
-                st.subheader("📝 本地脱敏后的合同文本")
-                st.markdown(
-                    "<div style='font-size:12px; color:#30d158; background-color:rgba(48,209,88,0.1); padding:8px 12px; border-radius:6px; border:1px solid rgba(48,209,88,0.25); margin-bottom:12px;'>"
-                    "🛡️ [安全脱敏开启] 身份证号和联系电话已本地强制脱敏，不会传至任何第三方 API。"
-                    "</div>", 
-                    unsafe_allow_html=True
-                )
-                st.text_area("清洗后文本预览 (只读)", clean_text, height=380, disabled=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+                # 使用原生的 st.container(border=True) 作为卡片，杜绝 HTML 容器分裂导致的空卡片故障
+                with st.container(border=True):
+                    st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>📑 提取到的合同元数据</h4>", unsafe_allow_html=True)
+                    
+                    # 元数据 2x2 极简表格样式呈现
+                    st.markdown(f"""
+                    <table style='width:100%; border:none; color:#1d1d1f; font-size:14px; margin-bottom:15px;'>
+                        <tr>
+                            <td style='padding:8px 0; border:none; width:50%;'><span style='color:#86868b;'>甲方单位:</span> <strong style='color:#1d1d1f;'>{metadata['party_a']}</strong></td>
+                            <td style='padding:8px 0; border:none; width:50%;'><span style='color:#86868b;'>乙方姓名:</span> <strong style='color:#1d1d1f;'>{metadata['party_b']}</strong></td>
+                        </tr>
+                        <tr>
+                            <td style='padding:8px 0; border:none;'><span style='color:#86868b;'>合同期限:</span> <strong style='color:#1d1d1f;'>{metadata['duration']}</strong></td>
+                            <td style='padding:8px 0; border:none;'><span style='color:#86868b;'>约定薪资:</span> <strong style='color:#1d1d1f;'>{metadata['salary']}</strong></td>
+                        </tr>
+                    </table>
+                    """, unsafe_allow_html=True)
+                    
+                    st.markdown("<hr style='border: 0.5px solid #d2d2d7;'>", unsafe_allow_html=True)
+                    st.markdown("<h4 style='color:#1d1d1f;'>📝 本地脱敏后的合同文本</h4>", unsafe_allow_html=True)
+                    st.markdown(
+                        "<div style='font-size:12px; color:#34c759; background-color:rgba(52,199,89,0.1); padding:8px 12px; border-radius:6px; border:1px solid rgba(52,199,89,0.25); margin-bottom:12px;'>"
+                        "🛡️ [安全脱敏开启] 身份证号和联系电话已本地强制脱敏，不会传至任何第三方 API。"
+                        "</div>", 
+                        unsafe_allow_html=True
+                    )
+                    st.text_area("清洗后文本预览 (只读)", clean_text, height=380, disabled=True)
                 
             with right_col:
-                st.markdown('<div class="apple-card">', unsafe_allow_html=True)
-                st.subheader("🤖 智能合规会审面板")
-                
-                # 苹果淡蓝高亮主行动按钮
-                st.markdown("""
-                <style>
-                    div.stButton > button:first-child {
-                        background-color: #2f9eef !important;
-                        color: #ffffff !important;
-                        border: none !important;
-                        border-radius: 8px !important;
-                        font-weight: 600 !important;
-                        font-size: 15px !important;
-                        height: 44px !important;
-                        transition: background-color 0.2s ease, transform 0.1s ease !important;
-                    }
-                    div.stButton > button:first-child:hover {
-                        background-color: #1a8ad4 !important;
-                        transform: translateY(-1px);
-                    }
-                    div.stButton > button:first-child:active {
-                        transform: translateY(1px);
-                    }
-                </style>
-                """, unsafe_allow_html=True)
-                
-                run_audit = st.button("🚀 开始双智能体协同合规会审", use_container_width=True)
-                
-                if run_audit:
-                    status_box = st.empty()
+                with st.container(border=True):
+                    st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>🤖 智能合规会审面板</h4>", unsafe_allow_html=True)
                     
-                    # 1. 运行检索匹配
-                    status_box.markdown(
-                        "<div style='color:#2f9eef; font-size:13px; margin: 10px 0;'>🔍 [1/4] 正在从本地 FAISS 法律知识库召回相关劳动法条规约...</div>", 
-                        unsafe_allow_html=True
-                    )
-                    db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
-                    try:
-                        retrieved_laws = query_laws(clean_text[:400], db_dir, top_k=3)
-                    except Exception:
-                        retrieved_laws = "《中华人民共和国劳动合同法》第十九条：试用期规定..."
-                        
-                    # 2. 构造 LangGraph 双智能体状态输入
-                    inputs = {
-                        "contract_text": clean_text,
-                        "retrieved_laws": retrieved_laws,
-                        "raw_audit": "",
-                        "feedback": "",
-                        "final_report": "",
-                        "loop_count": 0
-                    }
-                    
-                    # 3. 调用多智能体流转引擎
-                    status_box.markdown(
-                        "<div style='color:#2f9eef; font-size:13px; margin: 10px 0;'>🤖 [2/4] 启动 Auditor 初审智能体对条款进行法条比对与评估...</div>", 
-                        unsafe_allow_html=True
-                    )
-                    app = build_agent_graph()
-                    
-                    try:
-                        result = app.invoke(inputs)
-                        
-                        status_box.markdown(
-                            "<div style='color:#2f9eef; font-size:13px; margin: 10px 0;'>⚖️ [3/4] 启动 Critic 反思审计节点，正在进行风险核校并整理修正对策...</div>", 
-                            unsafe_allow_html=True
-                        )
-                        
-                        status_box.markdown(
-                            "<div style='color:#30d158; font-size:13px; font-weight:600; margin: 10px 0;'>🎉 [4/4] 审查完成！以下为联合生成的《合规智能会审报告》：</div>", 
-                            unsafe_allow_html=True
-                        )
-                        
-                        st.markdown("### 📄 智能合规审查报告")
-                        st.markdown(result["final_report"])
-                        
-                        # 4. 解析风险统计并持久化入库
-                        raw_audit_text = result.get("raw_audit", "")
-                        risk_high_cnt = raw_audit_text.count("高风险")
-                        risk_med_cnt = raw_audit_text.count("中风险")
-                        
-                        insert_audit_log(
-                            filename=uploaded_file.name,
-                            party_a=metadata["party_a"],
-                            party_b=metadata["party_b"],
-                            risk_high=risk_high_cnt,
-                            risk_med=risk_med_cnt
-                        )
-                        
-                        # 5. 苹果风次级下载按钮
-                        st.markdown("---")
-                        st.download_button(
-                            label="💾 一键导出合规审查报告 (Markdown格式)",
-                            data=result["final_report"],
-                            file_name=f"劳动合同合规审查报告_{uploaded_file.name.split('.')[0]}.md",
-                            mime="text/markdown",
-                            use_container_width=True
-                        )
-                        
-                    except Exception as ex:
-                        st.error(f"双智能体调用失败，请检查网络或 DeepSeek API 密钥。错误: {ex}")
-                else:
-                    # 激活状态等待提示
+                    # 苹果亮蓝高亮主行动按钮
                     st.markdown("""
-                    <div style="text-align: center; padding: 40px 10px; color: #86868b;">
-                        <div style="font-size: 24px; margin-bottom: 8px;">⚖️</div>
-                        <div style="font-size: 13px;">点击上方按钮，启动双智能体反思协同会审</div>
-                    </div>
+                    <style>
+                        div.stButton > button:first-child {
+                            background-color: #0071e3 !important;
+                            color: #ffffff !important;
+                            border: none !important;
+                            border-radius: 8px !important;
+                            font-weight: 600 !important;
+                            font-size: 14px !important;
+                            height: 40px !important;
+                            transition: background-color 0.2s ease, transform 0.1s ease !important;
+                        }
+                        div.stButton > button:first-child:hover {
+                            background-color: #0077ed !important;
+                            transform: translateY(-1px);
+                        }
+                        div.stButton > button:first-child:active {
+                            transform: translateY(1px);
+                        }
+                    </style>
                     """, unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    run_audit = st.button("🚀 开始双智能体协同合规会审", use_container_width=True)
+                    
+                    if run_audit:
+                        status_box = st.empty()
+                        
+                        # 1. 运行检索匹配
+                        status_box.markdown(
+                            "<div style='color:#0071e3; font-size:13px; margin: 10px 0;'>🔍 [1/4] 正在从本地 FAISS 法律知识库召回相关劳动法条规约...</div>", 
+                            unsafe_allow_html=True
+                        )
+                        db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
+                        try:
+                            retrieved_laws = query_laws(clean_text[:400], db_dir, top_k=3)
+                        except Exception:
+                            retrieved_laws = "《中华人民共和国劳动合同法》第十九条：试用期规定..."
+                            
+                        # 2. 构造 LangGraph 双智能体状态输入
+                        inputs = {
+                            "contract_text": clean_text,
+                            "retrieved_laws": retrieved_laws,
+                            "raw_audit": "",
+                            "feedback": "",
+                            "final_report": "",
+                            "loop_count": 0
+                        }
+                        
+                        # 3. 调用多智能体流转引擎
+                        status_box.markdown(
+                            "<div style='color:#0071e3; font-size:13px; margin: 10px 0;'>🤖 [2/4] 启动 Auditor 初审智能体对条款进行法条比对与评估...</div>", 
+                            unsafe_allow_html=True
+                        )
+                        app = build_agent_graph()
+                        
+                        try:
+                            result = app.invoke(inputs)
+                            
+                            status_box.markdown(
+                                "<div style='color:#0071e3; font-size:13px; margin: 10px 0;'>⚖️ [3/4] 启动 Critic 反思审计节点，正在进行风险核校并整理修正对策...</div>", 
+                                unsafe_allow_html=True
+                            )
+                            
+                            status_box.markdown(
+                                "<div style='color:#34c759; font-size:13px; font-weight:600; margin: 10px 0;'>🎉 [4/4] 审查完成！以下为联合生成的《合规智能会审报告》：</div>", 
+                                unsafe_allow_html=True
+                            )
+                            
+                            st.markdown("### 📄 智能合规审查报告")
+                            st.markdown(result["final_report"])
+                            
+                            # 4. 解析风险统计并持久化入库
+                            raw_audit_text = result.get("raw_audit", "")
+                            risk_high_cnt = raw_audit_text.count("高风险")
+                            risk_med_cnt = raw_audit_text.count("中风险")
+                            
+                            insert_audit_log(
+                                filename=uploaded_file.name,
+                                party_a=metadata["party_a"],
+                                party_b=metadata["party_b"],
+                                risk_high=risk_high_cnt,
+                                risk_med=risk_med_cnt
+                            )
+                            
+                            # 5. 导出下载按钮
+                            st.markdown("---")
+                            st.download_button(
+                                label="💾 一键导出合规审查报告 (Markdown格式)",
+                                data=result["final_report"],
+                                file_name=f"劳动合同合规审查报告_{uploaded_file.name.split('.')[0]}.md",
+                                mime="text/markdown",
+                                use_container_width=True
+                            )
+                            
+                        except Exception as ex:
+                            st.error(f"双智能体调用失败，请检查网络或 DeepSeek API 密钥。错误: {ex}")
+                    else:
+                        # 激活状态等待提示
+                        st.markdown("""
+                        <div style="text-align: center; padding: 40px 10px; color: #86868b;">
+                            <div style="font-size: 24px; margin-bottom: 8px;">⚖️</div>
+                            <div style="font-size: 13px;">点击上方按钮，启动双智能体反思协同会审</div>
+                        </div>
+                        """, unsafe_allow_html=True)
                 
         # 物理清理本地缓存
         if os.path.exists(temp_path):
@@ -363,9 +395,9 @@ with tab_audit:
     else:
         # 清爽优雅的空置首屏引导区 (Onboard State)
         st.markdown("""
-        <div style="text-align: center; padding: 70px 20px; color: #86868b; background-color: #252526; border-radius: 12px; border: 1px dashed #424245;">
+        <div style="text-align: center; padding: 70px 20px; color: #86868b; background-color: #ffffff; border-radius: 12px; border: 1px dashed #d2d2d7;">
             <div style="font-size: 52px; margin-bottom: 18px;">🛡️</div>
-            <div style="font-size: 16px; font-weight: 600; color: #f5f5f7; margin-bottom: 8px;">准备好开始合规审查了吗？</div>
+            <div style="font-size: 16px; font-weight: 600; color: #1d1d1f; margin-bottom: 8px;">准备好开始合规审查了吗？</div>
             <div style="font-size: 13px; max-width: 460px; margin: 0 auto 20px auto; line-height: 1.45;">
                 请在上方拖入或选择一份需要审计的劳动合同。系统会利用本地正则表达式对身份证号与电话号码进行前置安全占位脱敏，保护数据不泄露，然后结合劳动法向量文库召回法律参考，协助 Auditor 与 Critic 进行专业审计。
             </div>
@@ -388,28 +420,28 @@ with tab_dashboard:
             "累计已审查合同", 
             f"{kpis['total_audits']} 份", 
             "SQLite 本地物理库统计数", 
-            "#424245" # 默认银灰
+            "#d2d2d7" # 银灰
         )
     with col2:
         render_kpi_card(
             "高风险合同占比", 
             kpis['high_risk_ratio'], 
             "含有 1 项以上高风险项合同", 
-            "rgba(255, 69, 58, 0.4)" # 高亮淡红
+            "rgba(255, 59, 48, 0.4)" # 高亮淡红
         )
     with col3:
         render_kpi_card(
             "平均审查速度", 
             kpis['average_duration'], 
             "双智能体流转反思耗时均值", 
-            "rgba(47, 158, 239, 0.4)" # 高亮淡蓝
+            "rgba(0, 113, 227, 0.4)" # 高亮淡蓝
         )
     with col4:
         render_kpi_card(
             "安全性与数据隐私", 
             "本地脱敏激活", 
             "敏感身份证/电话号强制转换", 
-            "rgba(48, 209, 88, 0.4)" # 高亮淡绿
+            "rgba(52, 199, 89, 0.4)" # 高亮淡绿
         )
         
     st.markdown("<br>", unsafe_allow_html=True)
@@ -422,75 +454,71 @@ with tab_dashboard:
     plt.rcParams['axes.unicode_minus'] = False
     
     with chart_col:
-        st.markdown('<div class="apple-card">', unsafe_allow_html=True)
-        st.subheader("📈 历史审查风险分布统计")
-        
-        # 抓取图表统计数据
-        filenames, highs, meds = get_monthly_risk_stats()
-        
-        if filenames:
-            # 苹果风格深空灰配色主题图表绘制
-            fig, ax = plt.subplots(figsize=(7, 3.2), facecolor='#252526')
-            ax.set_facecolor('#252526')
+        with st.container(border=True):
+            st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>📈 历史审查风险分布统计</h4>", unsafe_allow_html=True)
             
-            x = np.arange(len(filenames))
-            width = 0.35
+            # 抓取图表统计数据
+            filenames, highs, meds = get_monthly_risk_stats()
             
-            # 高风险红，中风险橙
-            ax.bar(x - width/2, highs, width, label='高风险', color='#ff453a', edgecolor='none')
-            ax.bar(x + width/2, meds, width, label='中风险', color='#ff9f0a', edgecolor='none')
-            
-            ax.set_ylabel('风险条款数', color='#86868b', fontsize=8)
-            ax.set_title('近期上传合同风险项对比图', color='#f5f5f7', fontsize=9, fontweight='bold')
-            ax.set_xticks(x)
-            ax.set_xticklabels(filenames, rotation=12, color='#86868b', fontsize=7)
-            
-            ax.legend(facecolor='#161617', edgecolor='#424245', labelcolor='#f5f5f7', fontsize=7)
-            ax.tick_params(colors='#86868b', labelsize=8)
-            
-            # 精简轴线
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-            ax.spines['left'].set_color('#424245')
-            ax.spines['bottom'].set_color('#424245')
-            
-            st.pyplot(fig)
-        else:
-            st.info("数据为空，待上传审核合同生成数据图表。")
-        st.markdown('</div>', unsafe_allow_html=True)
+            if filenames:
+                # 苹果风格亮色主题图表绘制
+                fig, ax = plt.subplots(figsize=(7, 3.2), facecolor='#ffffff')
+                ax.set_facecolor('#ffffff')
+                
+                x = np.arange(len(filenames))
+                width = 0.35
+                
+                # 高风险红，中风险橙
+                ax.bar(x - width/2, highs, width, label='高风险', color='#ff3b30', edgecolor='none')
+                ax.bar(x + width/2, meds, width, label='中风险', color='#ff9500', edgecolor='none')
+                
+                ax.set_ylabel('风险条款数', color='#86868b', fontsize=8)
+                ax.set_title('近期上传合同风险项对比图', color='#1d1d1f', fontsize=9, fontweight='bold')
+                ax.set_xticks(x)
+                ax.set_xticklabels(filenames, rotation=12, color='#86868b', fontsize=7)
+                
+                ax.legend(facecolor='#f5f5f7', edgecolor='#d2d2d7', labelcolor='#1d1d1f', fontsize=7)
+                ax.tick_params(colors='#86868b', labelsize=8)
+                
+                # 精简轴线
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['left'].set_color('#d2d2d7')
+                ax.spines['bottom'].set_color('#d2d2d7')
+                
+                st.pyplot(fig)
+            else:
+                st.info("数据为空，待上传审核合同生成数据图表。")
         
     with flow_col:
-        st.markdown('<div class="apple-card" style="height: 100%;">', unsafe_allow_html=True)
-        st.subheader("📋 最新合同审查活动流列表")
-        
-        activities = get_recent_activities(limit=5)
-        if activities:
-            html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>甲方单位</th><th>乙方姓名</th><th>风险分布</th><th>日期</th></tr></thead><tbody>"
-            for act in activities:
-                html_code += f"<tr><td>{act['filename']}</td><td>{act['party_a']}</td><td>{act['party_b']}</td><td><span class='badge-high'>高 {act['risk_high']}</span> <span class='badge-med'>中 {act['risk_med']}</span></td><td style='color:#86868b;'>{act['created_at'].split(' ')[0]}</td></tr>"
-            html_code += "</tbody></table>"
-            st.markdown(html_code, unsafe_allow_html=True)
-        else:
-            st.info("尚无审查流水记录。")
-        st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>📋 最新合同审查活动流列表</h4>", unsafe_allow_html=True)
+            
+            activities = get_recent_activities(limit=5)
+            if activities:
+                html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>甲方单位</th><th>乙方姓名</th><th>风险分布</th><th>日期</th></tr></thead><tbody>"
+                for act in activities:
+                    html_code += f"<tr><td>{act['filename']}</td><td>{act['party_a']}</td><td>{act['party_b']}</td><td><span class='badge-high'>高 {act['risk_high']}</span> <span class='badge-med'>中 {act['risk_med']}</span></td><td style='color:#86868b;'>{act['created_at'].split(' ')[0]}</td></tr>"
+                html_code += "</tbody></table>"
+                st.markdown(html_code, unsafe_allow_html=True)
+            else:
+                st.info("尚无审查流水记录。")
 
 # ------------------------------------------
 # TAB 3: 合规法律条款文库
 # ------------------------------------------
 with tab_library:
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("### 📚 劳动合规法律法规库")
     
     # 扫描 laws 目录
     laws_dir = os.path.join(os.path.dirname(__file__), "data", "laws")
     if os.path.exists(laws_dir):
         law_files = [f for f in os.listdir(laws_dir) if f.endswith((".docx", ".pdf"))]
         if law_files:
-            st.markdown('<div class="apple-card">', unsafe_allow_html=True)
-            st.markdown("##### 📂 已成功加载的法律与司法解释文本（本地 RAG 数据源）")
-            for name in law_files:
-                st.markdown(f"- 📄 `{name}`")
-            st.markdown('</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown("<h5 style='margin-top:0; color:#1d1d1f;'>📂 已成功加载的法律与司法解释文本（本地 RAG 数据源）</h5>", unsafe_allow_html=True)
+                for name in law_files:
+                    st.markdown(f"- 📄 `{name}`")
         else:
             st.warning("法律法规目录为空，请将参考法条放入 data/laws/ 目录。")
             
@@ -518,7 +546,7 @@ with tab_library:
                 st.markdown("##### ⚖️ RAG 检索命中的最相关背景法条（Top 2）")
                 # 放在带有苹果细线边框的区域
                 st.markdown(f"""
-                <div style='background-color:#1d1d1f; padding:16px; border-radius:8px; border:1px solid #424245; white-space:pre-wrap; color:#f5f5f7; font-size:13px; line-height:1.6;'>
+                <div style='background-color:#ffffff; padding:16px; border-radius:8px; border:1px solid #d2d2d7; white-space:pre-wrap; color:#1d1d1f; font-size:13px; line-height:1.6;'>
 {results}
                 </div>
                 """, unsafe_allow_html=True)
