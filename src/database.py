@@ -26,7 +26,7 @@ def get_db_connection():
 
 def init_db() -> None:
     """
-    初始化数据库：若表不存在则自动建立 audit_logs 表，并导入初始演示数据
+    初始化数据库：若表不存在则自动建立 audit_logs 表，并执行必要的表结构迁移
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -40,33 +40,32 @@ def init_db() -> None:
         party_b VARCHAR(100),
         risk_count_high INTEGER DEFAULT 0,
         risk_count_med INTEGER DEFAULT 0,
+        duration_seconds REAL DEFAULT 0,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """)
     conn.commit()
     
-    # 检查是否为空，若为空则导入演示用的模拟历史记录（保证看板页面初次加载时有美观的图表数据）
-    cursor.execute("SELECT COUNT(*) as cnt FROM audit_logs")
-    if cursor.fetchone()["cnt"] == 0:
-        seed_data = [
-            ("劳动合同模板(普通岗).docx", "北京百度网讯科技有限公司", "李四", 0, 1, "2026-05-17 10:15:30"),
-            ("研发专家聘用协议.pdf", "深圳腾讯计算机系统有限公司", "张三", 2, 2, "2026-05-18 14:20:00"),
-            ("行政前台固定合同.docx", "杭州某某电子商务有限公司", "王五", 1, 0, "2026-05-19 09:30:15"),
-            ("销售经理任职劳动合同.pdf", "广州某某进出口贸易公司", "赵六", 0, 0, "2026-05-19 11:45:00"),
-            ("高级算法工程师保密协议.docx", "上海人工智能科学研究院", "孙七", 1, 1, "2026-05-19 15:10:22")
-        ]
-        cursor.executemany("""
-        INSERT INTO audit_logs (filename, party_a, party_b, risk_count_high, risk_count_med, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """, seed_data)
-        conn.commit()
-        print("[Database] 成功写入演示用模拟历史记录！")
+    cursor.execute("PRAGMA table_info(audit_logs)")
+    columns = {row["name"] for row in cursor.fetchall()}
+    if "duration_seconds" not in columns:
+        cursor.execute("ALTER TABLE audit_logs ADD COLUMN duration_seconds REAL DEFAULT 0")
+
+    seed_filenames = [
+        "劳动合同模板(普通岗).docx",
+        "研发专家聘用协议.pdf",
+        "行政前台固定合同.docx",
+        "销售经理任职劳动合同.pdf",
+        "高级算法工程师保密协议.docx"
+    ]
+    cursor.executemany("DELETE FROM audit_logs WHERE filename = ?", [(name,) for name in seed_filenames])
+    conn.commit()
         
     conn.close()
     print(f"[Database] SQLite 数据库初始化成功！文件路径: {DB_PATH}")
 
 
-def insert_audit_log(filename: str, party_a: str, party_b: str, risk_high: int, risk_med: int) -> int:
+def insert_audit_log(filename: str, party_a: str, party_b: str, risk_high: int, risk_med: int, duration_seconds: float = 0.0) -> int:
     """
     在合同审核完成后，将审计元数据写入 SQLite 中进行存盘
     :param filename: 合同源文件名称
@@ -80,14 +79,15 @@ def insert_audit_log(filename: str, party_a: str, party_b: str, risk_high: int, 
     cursor = conn.cursor()
     
     cursor.execute("""
-    INSERT INTO audit_logs (filename, party_a, party_b, risk_count_high, risk_count_med, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO audit_logs (filename, party_a, party_b, risk_count_high, risk_count_med, duration_seconds, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         filename,
         party_a or "未知用人单位",
         party_b or "未知劳动者",
         risk_high,
         risk_med,
+        round(duration_seconds, 2),
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ))
     
@@ -105,13 +105,18 @@ def get_kpi_metrics() -> Dict[str, Any]:
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # 统计总数
-    cursor.execute("SELECT COUNT(*) as total FROM audit_logs")
+    latest_rows_filter = "id IN (SELECT MAX(id) FROM audit_logs GROUP BY filename)"
+
+    # 统计每个合同文件的最新审查结果，避免重复测试同一文件污染看板
+    cursor.execute(f"SELECT COUNT(*) as total FROM audit_logs WHERE {latest_rows_filter}")
     total_count = cursor.fetchone()["total"]
     
     # 统计高风险数
-    cursor.execute("SELECT COUNT(*) as high_risks FROM audit_logs WHERE risk_count_high > 0")
+    cursor.execute(f"SELECT COUNT(*) as high_risks FROM audit_logs WHERE {latest_rows_filter} AND risk_count_high > 0")
     high_risk_files = cursor.fetchone()["high_risks"]
+
+    cursor.execute(f"SELECT AVG(duration_seconds) as avg_duration FROM audit_logs WHERE {latest_rows_filter} AND duration_seconds > 0")
+    avg_duration = cursor.fetchone()["avg_duration"] or 0
     
     # 计算高风险合同占比
     high_risk_ratio = 0.0
@@ -124,7 +129,7 @@ def get_kpi_metrics() -> Dict[str, Any]:
     return {
         "total_audits": total_count if total_count > 0 else 0,
         "high_risk_ratio": f"{high_risk_ratio}%" if total_count > 0 else "0.0%",
-        "average_duration": "12.4 秒" if total_count > 0 else "0.0 秒"
+        "average_duration": f"{round(avg_duration, 1)} 秒" if avg_duration > 0 else "0.0 秒"
     }
 
 def get_recent_activities(limit: int = 5) -> List[Dict[str, Any]]:
@@ -135,8 +140,9 @@ def get_recent_activities(limit: int = 5) -> List[Dict[str, Any]]:
     cursor = conn.cursor()
     
     cursor.execute("""
-    SELECT id, filename, party_a, party_b, risk_count_high, risk_count_med, created_at
+    SELECT id, filename, party_a, party_b, risk_count_high, risk_count_med, duration_seconds, created_at
     FROM audit_logs
+    WHERE id IN (SELECT MAX(id) FROM audit_logs GROUP BY filename)
     ORDER BY id DESC
     LIMIT ?
     """, (limit,))
@@ -153,6 +159,7 @@ def get_recent_activities(limit: int = 5) -> List[Dict[str, Any]]:
             "party_b": row["party_b"],
             "risk_high": row["risk_count_high"],
             "risk_med": row["risk_count_med"],
+            "duration_seconds": row["duration_seconds"],
             "created_at": row["created_at"]
         })
     return activities
@@ -168,6 +175,7 @@ def get_monthly_risk_stats() -> Tuple[List[str], List[int], List[int]]:
     cursor.execute("""
     SELECT id, filename, risk_count_high, risk_count_med
     FROM audit_logs
+    WHERE id IN (SELECT MAX(id) FROM audit_logs GROUP BY filename)
     ORDER BY id DESC
     LIMIT 10
     """)

@@ -9,6 +9,8 @@
 import streamlit as st
 import os
 import sys
+import re
+import time
 import matplotlib.pyplot as plt
 import numpy as np
 import base64
@@ -20,6 +22,10 @@ from parser import extract_contract_text, desensitize_text, extract_metadata
 from database import init_db, insert_audit_log, get_kpi_metrics, get_recent_activities, get_monthly_risk_stats
 from agent import build_agent_graph
 from retriever import query_laws
+
+def count_risk_items(report_text: str, level: str) -> int:
+    pattern = rf"(?m)^\s*(?:#{{1,6}}\s*)?(?:\*\*)?(?:【{level}】|{level}项\s*\d+[:：]|{level}项[:：])"
+    return len(re.findall(pattern, report_text))
 
 # 预加载环境变量并初始化数据库
 load_dotenv()
@@ -134,6 +140,12 @@ st.markdown("""
         font-size: 13px;
         border-bottom: 1px solid #e5e5ea;
         color: #1d1d1f;
+    }
+    .apple-table th:nth-child(5),
+    .apple-table td:nth-child(5),
+    .apple-table th:nth-child(6),
+    .apple-table td:nth-child(6) {
+        white-space: nowrap;
     }
     .apple-table tr:hover {
         background-color: #fafafa;
@@ -335,6 +347,7 @@ with tab_audit:
                     run_audit = st.button("🚀 开始双智能体协同合规会审", use_container_width=True)
                     
                     if run_audit:
+                        audit_started_at = time.perf_counter()
                         status_box = st.empty()
                         
                         # 1. 运行检索匹配
@@ -376,15 +389,17 @@ with tab_audit:
                             
                             # 4. 解析风险统计并持久化入库
                             raw_audit_text = result.get("raw_audit", "")
-                            risk_high_cnt = raw_audit_text.count("高风险")
-                            risk_med_cnt = raw_audit_text.count("中风险")
+                            risk_high_cnt = count_risk_items(raw_audit_text, "高风险")
+                            risk_med_cnt = count_risk_items(raw_audit_text, "中风险")
+                            duration_seconds = time.perf_counter() - audit_started_at
                             
                             insert_audit_log(
                                 filename=uploaded_file.name,
                                 party_a=metadata["party_a"],
                                 party_b=metadata["party_b"],
                                 risk_high=risk_high_cnt,
-                                risk_med=risk_med_cnt
+                                risk_med=risk_med_cnt,
+                                duration_seconds=duration_seconds
                             )
                             
                             # 将结果保存至会话状态
@@ -546,9 +561,9 @@ with tab_dashboard:
             
             activities = get_recent_activities(limit=5)
             if activities:
-                html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>甲方单位</th><th>乙方姓名</th><th>风险分布</th><th>日期</th></tr></thead><tbody>"
+                html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>甲方单位</th><th>乙方姓名</th><th>风险分布</th><th>耗时</th><th>审查时间</th></tr></thead><tbody>"
                 for act in activities:
-                    html_code += f"<tr><td>{act['filename']}</td><td>{act['party_a']}</td><td>{act['party_b']}</td><td><span class='badge-high'>高 {act['risk_high']}</span> <span class='badge-med'>中 {act['risk_med']}</span></td><td style='color:#86868b;'>{act['created_at'].split(' ')[0]}</td></tr>"
+                    html_code += f"<tr><td>{act['filename']}</td><td>{act['party_a']}</td><td>{act['party_b']}</td><td><span class='badge-high'>高 {act['risk_high']}</span> <span class='badge-med'>中 {act['risk_med']}</span></td><td style='color:#86868b;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td style='color:#86868b;'>{act['created_at']}</td></tr>"
                 html_code += "</tbody></table>"
                 st.markdown(html_code, unsafe_allow_html=True)
             else:
