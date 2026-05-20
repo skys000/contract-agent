@@ -110,6 +110,9 @@ def get_kpi_metrics() -> Dict[str, Any]:
     # 统计每个合同文件的最新审查结果，避免重复测试同一文件污染看板
     cursor.execute(f"SELECT COUNT(*) as total FROM audit_logs WHERE {latest_rows_filter}")
     total_count = cursor.fetchone()["total"]
+
+    cursor.execute(f"SELECT COUNT(*) as today_count FROM audit_logs WHERE {latest_rows_filter} AND date(created_at) = date('now', 'localtime')")
+    today_count = cursor.fetchone()["today_count"]
     
     # 统计高风险数
     cursor.execute(f"SELECT COUNT(*) as high_risks FROM audit_logs WHERE {latest_rows_filter} AND risk_count_high > 0")
@@ -128,6 +131,7 @@ def get_kpi_metrics() -> Dict[str, Any]:
     # 如果数据库是空的，为了美观展示，我们给出一组基础初始数字
     return {
         "total_audits": total_count if total_count > 0 else 0,
+        "today_uploads": today_count if today_count > 0 else 0,
         "high_risk_ratio": f"{high_risk_ratio}%" if total_count > 0 else "0.0%",
         "average_duration": f"{round(avg_duration, 1)} 秒" if avg_duration > 0 else "0.0 秒"
     }
