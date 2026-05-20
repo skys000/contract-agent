@@ -75,6 +75,9 @@ def extract_contract_text(file_path: str) -> str:
         return parse_docx(file_path)
     elif file_extension == ".pdf":
         return parse_pdf(file_path)
+    elif file_extension == ".txt":
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
     elif file_extension == ".doc":
         # 对旧版 Word 格式进行友情拦截，引导用户转换格式
         raise ValueError("系统暂不支持 .doc 格式，请在 Office 中打开并另存为 .docx 格式后再行上传。")
