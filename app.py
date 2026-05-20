@@ -607,8 +607,8 @@ with tab_library:
         db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
         with st.spinner("正在语义计算并召回相关法条..."):
             try:
-                results = query_laws(law_query, db_dir, top_k=2)
-                st.markdown("##### ⚖️ RAG 检索命中的最相关背景法条（Top 2）")
+                results = query_laws(law_query, db_dir, top_k=5)
+                st.markdown("##### ⚖️ RAG 检索命中的最相关背景法条（Top 5）")
                 # 放在带有苹果细线边框的区域
                 st.markdown(f"""
                 <div style='background-color:#ffffff; padding:16px; border-radius:8px; border:1px solid #d2d2d7; white-space:pre-wrap; color:#1d1d1f; font-size:13px; line-height:1.6;'>

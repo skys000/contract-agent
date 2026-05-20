@@ -37,7 +37,8 @@ def _build_search_queries(contract_text: str) -> List[str]:
     priority_keywords = [
         "试用期", "社会保险", "社保", "加班", "工作时间", "休息休假", "违约金", "服务期",
         "培训", "竞业", "保密", "解除", "终止", "工资", "薪资", "劳动报酬", "工作地点",
-        "工作内容", "劳动保护", "劳动条件"
+        "工作内容", "劳动保护", "劳动条件", "知识产权", "专利", "著作权", "软件著作权",
+        "职务成果", "职务发明", "职务作品", "源代码", "代码", "算法", "开源", "个人作品"
     ]
     priority_clauses = [clause for clause in clauses if any(keyword in clause for keyword in priority_keywords)]
     fallback_clauses = [clause for clause in clauses if clause not in priority_clauses]
@@ -51,7 +52,8 @@ def _build_search_queries(contract_text: str) -> List[str]:
     if any(keyword in compact_text for keyword in ["社会保险", "社保", "五险"]):
         topic_queries.extend([
             "劳动合同 必备条款 社会保险",
-            "用人单位 劳动者 必须依法参加社会保险 缴纳社会保险费"
+            "用人单位 劳动者 必须依法参加社会保险 缴纳社会保险费",
+            "《中华人民共和国社会保险法》第五十八条 自用工之日起三十日 社会保险登记"
         ])
     if any(keyword in compact_text for keyword in ["工作时间", "休息休假", "加班", "工时"]):
         topic_queries.extend([
@@ -71,7 +73,26 @@ def _build_search_queries(contract_text: str) -> List[str]:
     if any(keyword in compact_text for keyword in ["竞业", "竞业限制"]):
         topic_queries.extend([
             "竞业限制 商业秘密 知识产权 保密事项 按月给予经济补偿",
-            "竞业限制 人员 范围 地域 期限 不得超过二年"
+            "竞业限制 人员 范围 地域 期限 不得超过二年",
+            "竞业限制 未约定经济补偿 十二个月平均工资 30% 最低工资标准"
+        ])
+    if any(keyword in compact_text for keyword in ["知识产权", "专利", "著作权", "软件著作权", "职务成果", "职务发明", "职务作品", "源代码", "代码", "算法", "开源", "个人作品"]):
+        topic_queries.extend([
+            "《中华人民共和国专利法》第六条 职务发明创造 主要利用本单位物质技术条件 专利申请权",
+            "《中华人民共和国著作权法》第十八条 职务作品 计算机软件 主要利用法人组织物质技术条件",
+            "《计算机软件保护条例》第十三条 软件著作权 本职工作 开发目标 物质技术条件"
+        ])
+    if any(keyword in compact_text for keyword in ["工伤", "职业伤害", "意外事故", "工伤保险"]):
+        topic_queries.extend([
+            "工伤保险 用人单位 缴纳工伤保险费 职工不缴纳",
+            "职工有下列情形之一的应当认定为工伤 工作时间工作场所",
+            "工伤保险待遇 治疗工伤的医疗费用 停工留薪期"
+        ])
+    if any(keyword in compact_text for keyword in ["女职工", "女员工", "怀孕", "产期", "哺乳期", "产假", "三期", "孕期"]):
+        topic_queries.extend([
+            "女职工在孕期产期哺乳期 用人单位不得解除劳动合同",
+            "女职工劳动保护 产假 生育享受",
+            "不得安排女职工 怀孕 哺乳 劳动强度 夜班"
         ])
     if any(keyword in compact_text for keyword in ["工作内容", "工作地点"]):
         topic_queries.append("劳动合同应当具备 工作内容 工作地点")
@@ -80,7 +101,7 @@ def _build_search_queries(contract_text: str) -> List[str]:
     if _has_risk_context(contract_text, ["解除", "终止"], ["依照中华人民共和国劳动合同法", "依照《中华人民共和国劳动合同法》", "不得违法解除", "依法应支付经济补偿"]):
         topic_queries.append("解除劳动合同 终止劳动合同 经济补偿")
     queries = topic_queries + priority_clauses + fallback_clauses
-    return list(dict.fromkeys(queries[:14] or [contract_text]))
+    return list(dict.fromkeys(queries[:18] or [contract_text]))
 
 def _is_substantive_law_chunk(text: str) -> bool:
     compact_text = re.sub(r"\s+", "", text)
@@ -104,9 +125,21 @@ def _law_chunk_keyword_score(query_text: str, law_text: str) -> int:
         ["违约金", "服务期", "专项培训"],
         ["竞业限制", "商业秘密", "保密事项", "经济补偿"],
         ["竞业限制", "高级管理人员", "高级技术人员", "不得超过二年"],
+        ["竞业限制", "十二个月平均工资", "30%", "最低工资标准"],
+        ["知识产权", "职务成果", "职务发明", "职务作品"],
+        ["职务发明创造", "物质技术条件", "专利申请权"],
+        ["职务作品", "计算机软件", "著作权"],
+        ["软件著作权", "本职工作", "开发目标", "物质技术条件"],
         ["工作内容", "工作地点", "必备条款"],
         ["劳动保护", "劳动条件", "职业危害"],
-        ["解除劳动合同", "终止劳动合同", "经济补偿"]
+        ["解除劳动合同", "终止劳动合同", "经济补偿"],
+        ["社会保险", "自用工之日起三十日", "社会保险登记"],
+        ["社会保险", "按时足额缴纳社会保险费", "按月"],
+        ["工伤", "工伤保险", "认定为工伤", "工伤保险待遇"],
+        ["女职工", "孕期", "产期", "哺乳期", "不得解除"],
+        ["产假", "生育", "女职工劳动保护"],
+        ["加班工资", "延长工作时间", "支付工资报酬", "百分之一百五十"],
+        ["每日工作时间", "每周工作时间", "不超过八小时", "四十四小时"]
     ]
     score = 0
     for group in keyword_groups:
@@ -129,7 +162,16 @@ def _law_chunk_penalty(query_text: str, law_text: str) -> float:
     ]
     if any(pattern in compact_law for pattern in generic_patterns):
         penalty += 0.45
-    if "女职工" in compact_law and "女职工" not in compact_query:
+    catch_all_patterns = [
+        "劳动合同应当具备以下条款",
+        "用人单位的名称、住所和法定代表人或者主要负责人",
+        "社会保险制度坚持广覆盖、保基本、多层次、可持续的方针",
+        "中华人民共和国境内的用人单位和个人依法缴纳社会保险费"
+    ]
+    if any(pattern in compact_law for pattern in catch_all_patterns):
+        penalty += 0.6
+    female_worker_markers = ["女职工", "女员工", "怀孕", "产期", "哺乳期", "孕期", "产假", "三期"]
+    if "女职工" in compact_law and not any(marker in compact_query for marker in female_worker_markers):
         penalty += 0.55
     if "未成年" in compact_law and "未成年" not in compact_query:
         penalty += 0.55
@@ -210,11 +252,29 @@ def _is_relevant_law_chunk(query_text: str, doc: LangchainDocument) -> bool:
     compact_query = re.sub(r"\s+", "", query_text)
     compact_text = re.sub(r"\s+", "", doc.page_content)
     dispute_keywords = ["仲裁", "调解", "诉讼", "受理", "劳动争议"]
-    target_articles = re.findall(ARTICLE_PATTERN, compact_query)
+    law_name_markers = [
+        "《",
+        "劳动合同法", "劳动法", "社会保险法", "工伤保险条例", "女职工劳动保护特别规定",
+        "职工带薪年休假条例", "专利法", "著作权法", "计算机软件保护条例",
+        "劳动争议调解仲裁法", "最高人民法院关于审理劳动争议案件适用法律问题的解释"
+    ]
+    target_articles = re.findall(ARTICLE_PATTERN, compact_query) if any(marker in compact_query for marker in law_name_markers) else []
     if "劳动合同法" in compact_query and "劳动合同法" not in source:
         return False
     if "劳动法" in compact_query and "劳动合同法" not in compact_query and "劳动法" not in source:
         return False
+    source_filters = [
+        ("社会保险法", "社会保险法"),
+        ("工伤保险条例", "工伤保险条例"),
+        ("女职工劳动保护特别规定", "女职工劳动保护特别规定"),
+        ("职工带薪年休假条例", "职工带薪年休假条例"),
+        ("专利法", "专利法"),
+        ("著作权法", "著作权法"),
+        ("计算机软件保护条例", "计算机软件保护条例"),
+    ]
+    for query_law_name, source_law_name in source_filters:
+        if query_law_name in compact_query and source_law_name not in source:
+            return False
     if target_articles and not any(article in compact_text for article in target_articles):
         return False
     if "劳动争议调解仲裁法" in source and not any(keyword in compact_query for keyword in dispute_keywords):
