@@ -578,7 +578,7 @@ with tab_library:
     # 扫描 laws 目录
     laws_dir = os.path.join(os.path.dirname(__file__), "data", "laws")
     if os.path.exists(laws_dir):
-        law_files = [f for f in os.listdir(laws_dir) if f.endswith((".docx", ".pdf"))]
+        law_files = [f for f in os.listdir(laws_dir) if f.endswith((".docx", ".pdf", ".txt"))]
         if law_files:
             with st.container(border=True):
                 st.markdown("<h5 style='margin-top:0; color:#1d1d1f;'>📂 已成功加载的法律与司法解释文本（本地 RAG 数据源）</h5>", unsafe_allow_html=True)
