@@ -158,7 +158,9 @@ def _law_chunk_penalty(query_text: str, law_text: str) -> float:
     generic_patterns = [
         "适用本法", "国家提倡", "社会保险水平应当与社会经济发展水平",
         "劳动合同分为固定期限", "集体合同签订后", "非全日制用工",
-        "劳务派遣单位", "劳动争议仲裁", "劳动争议案件", "依法建立和完善规章制度"
+        "劳务派遣单位", "劳动争议仲裁", "劳动争议案件", "依法建立和完善规章制度",
+        "国家工作人员在社会保险管理、监督工作中滥用职权",
+        "国务院人事部门、国务院劳动保障部门依据职权"
     ]
     if any(pattern in compact_law for pattern in generic_patterns):
         penalty += 0.45
