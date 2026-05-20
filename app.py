@@ -126,11 +126,21 @@ def render_contract_preview(contract_text: str, report_text: str = "") -> None:
         legend = f"<div class='risk-legend'>{''.join(legend_items)}</div>"
     st.markdown(f"{legend}<div class='contract-preview'>{''.join(pieces)}</div>", unsafe_allow_html=True)
 
-def _get_deepseek_client() -> OpenAI:
+def _get_llm_client() -> OpenAI:
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+    base_url = os.getenv("LLM_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL")
+    if not api_key or not base_url:
+        raise ValueError("未配置大模型 API，请在 .env 中设置 LLM_API_KEY/LLM_BASE_URL 或兼容的 DEEPSEEK_API_KEY/DEEPSEEK_BASE_URL。")
     return OpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url=os.getenv("DEEPSEEK_BASE_URL")
+        api_key=api_key,
+        base_url=base_url
     )
+
+def _get_chat_model_name() -> str:
+    model_name = os.getenv("CHAT_MODEL_NAME") or os.getenv("DEEPSEEK_MODEL_NAME")
+    if not model_name:
+        raise ValueError("未配置聊天模型名称，请在 .env 中设置 CHAT_MODEL_NAME 或兼容的 DEEPSEEK_MODEL_NAME。")
+    return model_name
 
 def _extract_law_reference_pairs(text: str) -> list[tuple[str, str]]:
     references = []
@@ -186,7 +196,7 @@ def _lookup_local_laws_for_consultation(first_answer: str, question: str, db_dir
     return f"【语义检索】用户问题\n{query_laws(question, db_dir, top_k=5)}"
 
 def _ask_legal_consultant_first_round(question: str) -> str:
-    client = _get_deepseek_client()
+    client = _get_llm_client()
     prompt = f"""
 你是劳动合同合规系统中的法律咨询预检智能体。请围绕用户问题给出简短初步判断，并列出你认为可能相关的中国劳动法律条文。
 
@@ -203,14 +213,14 @@ def _ask_legal_consultant_first_round(question: str) -> str:
 {question}
 """
     response = client.chat.completions.create(
-        model=os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat"),
+        model=_get_chat_model_name(),
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2
     )
     return response.choices[0].message.content.strip()
 
 def _stream_legal_consultant_final_answer(question: str, first_answer: str, local_laws: str):
-    client = _get_deepseek_client()
+    client = _get_llm_client()
     prompt = f"""
 你是劳动合同合规系统中的法律咨询助手。请只根据用户问题和本地法条库召回内容，给出正式答复。
 
@@ -231,7 +241,7 @@ def _stream_legal_consultant_final_answer(question: str, first_answer: str, loca
 {local_laws}
 """
     stream = client.chat.completions.create(
-        model=os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat"),
+        model=_get_chat_model_name(),
         messages=[{"role": "user", "content": prompt}],
         temperature=0.15,
         stream=True
@@ -245,8 +255,11 @@ def _stream_legal_consultant_final_answer(question: str, first_answer: str, loca
 load_dotenv()
 init_db()
 
+APP_NAME = os.getenv("APP_NAME", "基于多智能体的个人劳动合同风险预警系统")
+APP_SUBTITLE = os.getenv("APP_SUBTITLE", "极简、安全、专业的双智能体协同劳动合同风险预警系统")
+
 # 配置 Streamlit 页面属性为宽版模式
-st.set_page_config(page_title="劳动合同合规审查智能体系统", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title=APP_NAME, layout="wide", page_icon="🛡️")
 
 # ==========================================
 # 1. 苹果极简亮色 (Apple Light-Mode) CSS 样式注入
@@ -497,8 +510,8 @@ def render_kpi_card(title: str, value: str, subtitle: str, border_color: str = "
 # ==========================================
 # 2. 顶部主标题栏
 # ==========================================
-st.markdown('<div class="custom-title">🛡️ 劳动合同合规审查智能体系统</div>', unsafe_allow_html=True)
-st.markdown('<div class="custom-subtitle">极简、安全、专业的双智能体协同合规审查系统（Apple Light Mode）</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="custom-title">🛡️ {html.escape(APP_NAME)}</div>', unsafe_allow_html=True)
+st.markdown(f'<div class="custom-subtitle">{html.escape(APP_SUBTITLE)}</div>', unsafe_allow_html=True)
 
 # ==========================================
 # 3. 多页面 Tab 标签导航设计 (解耦复杂界面)
@@ -689,7 +702,7 @@ with tab_audit:
                             status_box.empty()
                             
                         except Exception as ex:
-                            st.error(f"双智能体调用失败，请检查网络或 DeepSeek API 密钥。错误: {ex}")
+                            st.error(f"双智能体调用失败，请检查网络或大模型 API 密钥。错误: {ex}")
                             
                     # 判断会话状态中是否有已生成的审计报告，若有则持续渲染（避免由于 Streamlit 重新运行导致的下载中断）
                     if st.session_state["audit_result"] is not None:
@@ -823,7 +836,7 @@ with tab_consult:
 
             st.session_state["consult_current_answer"] = final_answer
         except Exception as ex:
-            st.error(f"法律咨询助手调用失败，请检查 DeepSeek API Key、本地 FAISS 索引或网络配置。错误: {ex}")
+            st.error(f"法律咨询助手调用失败，请检查大模型 API Key、本地 FAISS 索引或网络配置。错误: {ex}")
 
 # ------------------------------------------
 # TAB 3: 运营数据看板大屏
@@ -948,7 +961,7 @@ with tab_library:
     st.markdown(
         "<div style='font-size:13px; color:#86868b; margin-bottom:16px;'>"
         "输入您关心的合同约定描述（例如：试用期约定六个月、离职不予退还保证金、拒绝缴纳社保等），"
-        "检索器将利用 BAAI/bge-m3 语义向量对 FAISS 知识库进行余弦距离度量并召回最为匹配的背景法条。"
+        f"检索器将利用当前配置的 `{html.escape(os.getenv('EMBEDDING_MODEL_NAME', '未配置'))}` 语义向量模型对 FAISS 知识库进行余弦距离度量并召回最为匹配的背景法条。"
         "</div>", 
         unsafe_allow_html=True
     )

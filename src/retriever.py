@@ -19,6 +19,12 @@ from parser import extract_contract_text
 
 ARTICLE_PATTERN = r"第[一二三四五六七八九十百零〇]+条"
 
+def _get_embedding_model_name() -> str:
+    model_name = os.getenv("EMBEDDING_MODEL_NAME")
+    if not model_name:
+        raise ValueError("未配置向量模型名称，请在 .env 中设置 EMBEDDING_MODEL_NAME。")
+    return model_name
+
 def _has_risk_context(text: str, keywords: List[str], safe_markers: List[str]) -> bool:
     compact_text = re.sub(r"\s+", "", text)
     if not any(keyword in compact_text for keyword in keywords):
@@ -409,16 +415,16 @@ def build_law_vector_db(laws_dir: str, save_dir: str) -> None:
     print(f"[RAG] 法规文本按法条粒度切分完毕，共生成 {len(split_docs)} 个语义文本块。")
     
     # 3. 初始化 OpenAI 兼容协议的 Embedding 客户端
-    # 使用 .env 中配置的 SiliconFlow API-KEY 与 BASE-URL
+    embedding_model_name = _get_embedding_model_name()
     embeddings = OpenAIEmbeddings(
         openai_api_key=os.getenv("API_KEY"),
         openai_api_base=os.getenv("BASE_URL"),
-        model="BAAI/bge-m3",
-        chunk_size=32  # 限制分批提交的向量数量，满足硅基流动 API 最大单次 64 的限制
+        model=embedding_model_name,
+        chunk_size=32
     )
     
     # 4. 构建 FAISS 本地索引
-    print("[RAG] 正在调用 BAAI/bge-m3 接口计算法条向量，请稍候...")
+    print(f"[RAG] 正在调用 {embedding_model_name} 接口计算法条向量，请稍候...")
     db = FAISS.from_documents(split_docs, embeddings)
     
     # 5. 持久化索引到本地磁盘，以供系统主程序以毫秒级时延高速检索
@@ -438,7 +444,7 @@ def query_laws(query: str, db_dir: str, top_k: int = 5) -> str:
     embeddings = OpenAIEmbeddings(
         openai_api_key=os.getenv("API_KEY"),
         openai_api_base=os.getenv("BASE_URL"),
-        model="BAAI/bge-m3",
+        model=_get_embedding_model_name(),
         chunk_size=32
     )
     

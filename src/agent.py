@@ -2,7 +2,7 @@
 """
 模块名: src/agent.py
 作用: 基于 LangGraph 的 Auditor-Critic 双智能体协同审查状态机逻辑。
-      LLM 调用通过 DeepSeek 官方 API 驱动，且法条匹配通过本地 RAG 向量检索进行。
+      LLM 调用通过 OpenAI 兼容协议的大模型 API 驱动，且法条匹配通过本地 RAG 向量检索进行。
 """
 
 import os
@@ -19,6 +19,22 @@ from parser import extract_contract_text
 
 MAX_REFLECTION_ROUNDS = 5
 ARTICLE_NUM_PATTERN = r"[一二三四五六七八九十百千万零〇两\d]+"
+
+def _get_llm_client() -> OpenAI:
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
+    base_url = os.getenv("LLM_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL")
+    if not api_key or not base_url:
+        raise ValueError("未配置大模型 API，请在 .env 中设置 LLM_API_KEY/LLM_BASE_URL 或兼容的 DEEPSEEK_API_KEY/DEEPSEEK_BASE_URL。")
+    return OpenAI(
+        api_key=api_key,
+        base_url=base_url
+    )
+
+def _get_chat_model_name() -> str:
+    model_name = os.getenv("CHAT_MODEL_NAME") or os.getenv("DEEPSEEK_MODEL_NAME")
+    if not model_name:
+        raise ValueError("未配置聊天模型名称，请在 .env 中设置 CHAT_MODEL_NAME 或兼容的 DEEPSEEK_MODEL_NAME。")
+    return model_name
 
 def _clean_report_text(text: str) -> str:
     cleaned = text.strip()
@@ -254,11 +270,8 @@ def auditor_node(state: AgentState) -> Dict[str, Any]:
     """
     负责对照参考法条，对合同文本进行初步合规审查，指出高/中/低风险违规点，并提供整改条款。
     """
-    # 实例化连接 DeepSeek 官方 API 的客户端
-    client = OpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url=os.getenv("DEEPSEEK_BASE_URL")
-    )
+    # 实例化连接 OpenAI 兼容协议大模型 API 的客户端
+    client = _get_llm_client()
     
     # 动态调取 RAG 检索器。如果没有拉取过法条，则执行检索
     retrieved_laws = state.get("retrieved_laws", "")
@@ -319,7 +332,7 @@ def auditor_node(state: AgentState) -> Dict[str, Any]:
 
     # 调用大语言模型进行初审
     response = client.chat.completions.create(
-        model=os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat"),
+        model=_get_chat_model_name(),
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1  # 采用低温度系数确保法理审查的严谨性与确定性
     )
@@ -335,10 +348,7 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
     """
     负责对 Auditor 生成的初审报告草稿进行法理二次审计，防止出现幻觉（如捏造不存在的法条等）。
     """
-    client = OpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url=os.getenv("DEEPSEEK_BASE_URL")
-    )
+    client = _get_llm_client()
     
     prompt = f"""
 你是一个资深的中国劳动合同法务总监与反思审计智能体（Critic）。请对下属 Auditor 提交的劳动合同审查草稿进行双重反思审计。
@@ -378,7 +388,7 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
 """
 
     response = client.chat.completions.create(
-        model=os.getenv("DEEPSEEK_MODEL_NAME", "deepseek-chat"),
+        model=_get_chat_model_name(),
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2  # 稍微允许一些发散以促进更深入的潜在风险反思
     )
