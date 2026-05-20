@@ -39,15 +39,18 @@ def _normalize_law_name(name: str) -> str:
         "最高人民法院关于审理劳动争议案件适用法律问题的解释",
         "女职工劳动保护特别规定",
         "劳动争议调解仲裁法",
+        "计算机软件保护条例",
         "工资支付暂行规定",
         "工伤保险条例",
         "社会保险法",
+        "著作权法",
+        "专利法",
         "劳动合同法",
         "劳动法",
     ]:
         if keyword in name:
             return keyword
-    return re.sub(r"中华人民共和国|_\d+|\.docx|\.pdf|\s", "", name)
+    return re.sub(r"中华人民共和国|_\d+|\.docx|\.pdf|\.txt|\s", "", name)
 
 def _extract_law_refs(text: str) -> list[tuple[str, str]]:
     refs = []
@@ -135,6 +138,10 @@ def _lookup_law_article_text(law_name: str, article: str) -> tuple[str, str]:
             continue
         normalized_source = _normalize_law_name(file_name)
         if law_name == normalized_source or law_name in normalized_source or normalized_source in law_name:
+            candidates.append((file_name, file_path))
+        elif law_name in ["专利法", "著作权法", "计算机软件保护条例"] and "知识产权法" in file_name:
+            candidates.append((file_name, file_path))
+        elif law_name == "最高人民法院关于审理劳动争议案件适用法律问题的解释" and "最高法劳动争议司法解释" in file_name:
             candidates.append((file_name, file_path))
     for file_name, file_path in candidates:
         try:

@@ -61,6 +61,12 @@ def _build_search_queries(contract_text: str) -> List[str]:
             "用人单位应当保证劳动者每周至少休息一日",
             "延长工作时间 加班工资 支付工资报酬"
         ])
+    if any(keyword in compact_text for keyword in ["年休假", "带薪年休假", "未休年休假"]):
+        topic_queries.extend([
+            "职工连续工作一年以上 享受带薪年休假",
+            "单位根据生产工作的具体情况 职工本人意愿 统筹安排年休假",
+            "不能安排年休假 应当按照日工资收入支付年休假工资报酬"
+        ])
     if any(keyword in compact_text for keyword in ["劳动报酬", "工资", "薪资", "底薪"]):
         topic_queries.append("工资 货币形式 按月支付 不得克扣 无故拖欠")
     if _has_risk_context(contract_text, ["违约金", "服务期", "培训费"], ["不约定由乙方承担违法违约金", "依法发生专项培训服务期"]):
@@ -88,6 +94,12 @@ def _build_search_queries(contract_text: str) -> List[str]:
             "职工有下列情形之一的应当认定为工伤 工作时间工作场所",
             "工伤保险待遇 治疗工伤的医疗费用 停工留薪期"
         ])
+    if any(keyword in compact_text for keyword in ["职业病", "职业危害", "职业健康", "职业禁忌", "防护用品", "劳动防护"]):
+        topic_queries.extend([
+            "职业病危害 用人单位 职业健康检查 费用由用人单位承担",
+            "职业病危害 防护设施 个人使用的职业病防护用品 劳动者保护权利",
+            "不得安排孕期哺乳期女职工从事接触职业病危害作业"
+        ])
     if any(keyword in compact_text for keyword in ["女职工", "女员工", "怀孕", "产期", "哺乳期", "产假", "三期", "孕期"]):
         topic_queries.extend([
             "女职工在孕期产期哺乳期 用人单位不得解除劳动合同",
@@ -100,8 +112,15 @@ def _build_search_queries(contract_text: str) -> List[str]:
         topic_queries.append("劳动保护 劳动条件 职业危害防护")
     if _has_risk_context(contract_text, ["解除", "终止"], ["依照中华人民共和国劳动合同法", "依照《中华人民共和国劳动合同法》", "不得违法解除", "依法应支付经济补偿"]):
         topic_queries.append("解除劳动合同 终止劳动合同 经济补偿")
+    if any(keyword in compact_text for keyword in ["劳动争议", "仲裁", "调解", "诉讼", "争议处理"]):
+        dispute_topic_queries = [
+            "劳动争议 因确认劳动关系 劳动合同 劳动报酬 工伤医疗费 经济补偿",
+            "发生劳动争议 当事人可以申请调解 仲裁 提起诉讼",
+            "劳动争议申请仲裁的时效期间为一年"
+        ]
+        topic_queries = dispute_topic_queries + topic_queries
     queries = topic_queries + priority_clauses + fallback_clauses
-    return list(dict.fromkeys(queries[:18] or [contract_text]))
+    return list(dict.fromkeys(queries[:24] or [contract_text]))
 
 def _is_substantive_law_chunk(text: str) -> bool:
     compact_text = re.sub(r"\s+", "", text)
@@ -139,7 +158,10 @@ def _law_chunk_keyword_score(query_text: str, law_text: str) -> int:
         ["女职工", "孕期", "产期", "哺乳期", "不得解除"],
         ["产假", "生育", "女职工劳动保护"],
         ["加班工资", "延长工作时间", "支付工资报酬", "百分之一百五十"],
-        ["每日工作时间", "每周工作时间", "不超过八小时", "四十四小时"]
+        ["每日工作时间", "每周工作时间", "不超过八小时", "四十四小时"],
+        ["年休假", "带薪年休假", "未休年休假", "工资报酬"],
+        ["职业病危害", "职业健康检查", "防护用品", "职业禁忌"],
+        ["劳动争议", "调解", "仲裁", "诉讼", "仲裁时效"]
     ]
     score = 0
     for group in keyword_groups:
@@ -158,7 +180,7 @@ def _law_chunk_penalty(query_text: str, law_text: str) -> float:
     generic_patterns = [
         "适用本法", "国家提倡", "社会保险水平应当与社会经济发展水平",
         "劳动合同分为固定期限", "集体合同签订后", "非全日制用工",
-        "劳务派遣单位", "劳动争议仲裁", "劳动争议案件", "依法建立和完善规章制度",
+        "劳务派遣单位", "依法建立和完善规章制度",
         "国家工作人员在社会保险管理、监督工作中滥用职权",
         "国务院人事部门、国务院劳动保障部门依据职权"
     ]
@@ -188,6 +210,30 @@ def _law_chunk_penalty(query_text: str, law_text: str) -> float:
         if not any(marker in compact_query for marker in termination_violation_markers):
             penalty += 0.35
     return penalty
+
+def _law_source_adjustment(query_text: str, doc: LangchainDocument) -> float:
+    compact_query = re.sub(r"\s+", "", query_text)
+    compact_law = re.sub(r"\s+", "", doc.page_content)
+    source = doc.metadata.get("source", "")
+    adjustment = 0.0
+    if any(keyword in compact_query for keyword in ["劳动争议", "仲裁", "调解", "诉讼", "争议处理"]):
+        if "劳动争议调解仲裁法" in source or "最高法劳动争议司法解释" in source:
+            adjustment -= 0.65
+    if any(keyword in compact_query for keyword in ["职业病", "职业危害", "职业健康", "职业禁忌", "防护用品", "劳动防护"]):
+        if "职业病防治法" in source:
+            adjustment -= 0.55
+    if any(keyword in compact_query for keyword in ["年休假", "带薪年休假", "未休年休假"]):
+        if "职工带薪年休假条例" in source:
+            adjustment -= 0.55
+    if any(keyword in compact_query for keyword in ["知识产权", "专利", "著作权", "软件著作权", "职务成果", "职务发明", "职务作品", "源代码", "代码", "算法"]):
+        if "知识产权法" in source:
+            adjustment -= 0.55
+    if any(keyword in compact_query for keyword in ["加班", "工作时间", "工时", "大小周"]):
+        if "社会保险法" in source and not any(marker in compact_query for marker in ["社会保险", "社保", "工伤", "工伤保险"]):
+            adjustment += 0.65
+        if "劳动法" in source and any(marker in compact_law for marker in ["每日工作时间", "延长工作时间", "支付高于劳动者正常工作时间工资"]):
+            adjustment -= 0.35
+    return adjustment
 
 def _extract_article_from_law_text(text: str, article: str) -> str:
     pattern = rf"(?m)^{re.escape(article)}[　 \t][\s\S]*?(?=^{ARTICLE_PATTERN}[　 \t]|\Z)"
@@ -265,14 +311,17 @@ def _is_relevant_law_chunk(query_text: str, doc: LangchainDocument) -> bool:
         return False
     if "劳动法" in compact_query and "劳动合同法" not in compact_query and "劳动法" not in source:
         return False
+    social_source_markers = ["社会保险", "社保", "工伤", "工伤保险", "生育保险", "养老保险", "医疗保险", "失业保险", "保险费", "社保登记"]
+    if "社会保险法" in source and not any(marker in compact_query for marker in social_source_markers):
+        return False
     source_filters = [
         ("社会保险法", "社会保险法"),
         ("工伤保险条例", "工伤保险条例"),
         ("女职工劳动保护特别规定", "女职工劳动保护特别规定"),
         ("职工带薪年休假条例", "职工带薪年休假条例"),
-        ("专利法", "专利法"),
-        ("著作权法", "著作权法"),
-        ("计算机软件保护条例", "计算机软件保护条例"),
+        ("专利法", "知识产权法"),
+        ("著作权法", "知识产权法"),
+        ("计算机软件保护条例", "知识产权法"),
     ]
     for query_law_name, source_law_name in source_filters:
         if query_law_name in compact_query and source_law_name not in source:
@@ -281,7 +330,7 @@ def _is_relevant_law_chunk(query_text: str, doc: LangchainDocument) -> bool:
         return False
     if "劳动争议调解仲裁法" in source and not any(keyword in compact_query for keyword in dispute_keywords):
         return False
-    if "最高人民法院关于审理劳动争议案件适用法律问题的解释" in source:
+    if "最高人民法院关于审理劳动争议案件适用法律问题的解释" in source or "最高法劳动争议司法解释" in source:
         if "为正确审理劳动争议案件" in compact_text:
             return False
         if "竞业" in compact_query:
@@ -420,7 +469,7 @@ def query_laws(query: str, db_dir: str, top_k: int = 5) -> str:
                 continue
             if not _is_relevant_law_chunk(current_query, doc):
                 continue
-            rerank_score = score - (_law_chunk_keyword_score(current_query, doc.page_content) * 0.18) + _law_chunk_penalty(current_query, doc.page_content)
+            rerank_score = score - (_law_chunk_keyword_score(current_query, doc.page_content) * 0.18) + _law_chunk_penalty(current_query, doc.page_content) + _law_source_adjustment(current_query, doc)
             # 使用内容本身作为键进行去重
             key = re.sub(r"\s+", "", doc.page_content)
             if key not in unique_docs or rerank_score < unique_docs[key][0]:
@@ -432,7 +481,7 @@ def query_laws(query: str, db_dir: str, top_k: int = 5) -> str:
             and _is_relevant_law_chunk(current_query, doc)
         ]
         for lexical_rank, doc in enumerate(sorted(lexical_hits, key=lambda item: -_law_chunk_keyword_score(current_query, item.page_content))[:8]):
-            lexical_score = 0.35 - (_law_chunk_keyword_score(current_query, doc.page_content) * 0.12) + _law_chunk_penalty(current_query, doc.page_content)
+            lexical_score = 0.35 - (_law_chunk_keyword_score(current_query, doc.page_content) * 0.12) + _law_chunk_penalty(current_query, doc.page_content) + _law_source_adjustment(current_query, doc)
             key = re.sub(r"\s+", "", doc.page_content)
             if key not in unique_docs or lexical_score < unique_docs[key][0]:
                 unique_docs[key] = (lexical_score, doc)

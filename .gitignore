@@ -7,6 +7,8 @@ db/
 *.docx
 *.doc
 *.pyc
+*.txt
+!data/laws/*.txt
 .DS_Store
 data/*.db
 data/temp/
