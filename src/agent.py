@@ -15,8 +15,10 @@ from langgraph.graph import StateGraph, END
 # 将当前目录加入查找路径，确保正确引入 retriever 模块
 sys.path.append(os.path.dirname(__file__))
 from retriever import query_laws
+from parser import extract_contract_text
 
 MAX_REFLECTION_ROUNDS = 5
+ARTICLE_NUM_PATTERN = r"[一二三四五六七八九十百千万零〇两\d]+"
 
 def _clean_report_text(text: str) -> str:
     cleaned = text.strip()
@@ -25,14 +27,43 @@ def _clean_report_text(text: str) -> str:
     cleaned = re.sub(r"(?m)^好的，.*$", "", cleaned)
     return cleaned.strip()
 
+def _clean_feedback_text(text: str) -> str:
+    cleaned = _clean_report_text(text)
+    cleaned = re.sub(r"(?m)^我的审计结论如下：\s*$", "", cleaned)
+    cleaned = re.sub(r"(?m)^正在进行.*$", "", cleaned)
+    return cleaned.strip()
+
 def _normalize_law_name(name: str) -> str:
-    for keyword in ["劳动合同法", "劳动法", "工伤保险条例", "女职工劳动保护特别规定"]:
+    for keyword in [
+        "关于企业实行不定时工作制和综合计算工时工作制的审批办法",
+        "最高人民法院关于审理劳动争议案件适用法律问题的解释",
+        "女职工劳动保护特别规定",
+        "劳动争议调解仲裁法",
+        "工资支付暂行规定",
+        "工伤保险条例",
+        "社会保险法",
+        "劳动合同法",
+        "劳动法",
+    ]:
         if keyword in name:
             return keyword
     return re.sub(r"中华人民共和国|_\d+|\.docx|\.pdf|\s", "", name)
 
 def _extract_law_refs(text: str) -> list[tuple[str, str]]:
-    return [(_normalize_law_name(name), article) for name, article in re.findall(r"《([^》]+)》第([一二三四五六七八九十百零〇\d]+)条", text)]
+    refs = []
+    law_matches = list(re.finditer(r"《([^》]+)》", text))
+    for match in law_matches:
+        law_name = _normalize_law_name(match.group(1))
+        segment = text[match.end():match.end() + 80]
+        citation_match = re.match(rf"\s*第{ARTICLE_NUM_PATTERN}条(?:\s*[、,，和及]\s*第?{ARTICLE_NUM_PATTERN}条)*", segment)
+        if not citation_match:
+            continue
+        articles = re.findall(rf"第?({ARTICLE_NUM_PATTERN})条", citation_match.group(0))
+        for article in articles:
+            ref = (law_name, article)
+            if ref not in refs:
+                refs.append(ref)
+    return refs
 
 def _retrieved_laws_contain_ref(retrieved_laws: str, law_name: str, article: str) -> bool:
     normalized_law = _normalize_law_name(law_name)
@@ -55,7 +86,7 @@ def _split_risk_blocks(raw_audit: str) -> list[tuple[str, str, str]]:
 def _find_missing_supplemental_refs(raw_audit: str, retrieved_laws: str) -> list[str]:
     missing_supplements = []
     for _, _, block in _split_risk_blocks(raw_audit):
-        supplemental_refs = set(_extract_law_refs("\n".join(line for line in block.splitlines() if "补充法条依据" in line)))
+        supplemental_refs = set(_extract_explicit_supplemental_refs(block))
         for law_name, article in _extract_law_refs(block):
             if (law_name, article) in supplemental_refs:
                 continue
@@ -64,19 +95,82 @@ def _find_missing_supplemental_refs(raw_audit: str, retrieved_laws: str) -> list
                 missing_supplements.append(formatted_ref)
     return missing_supplements
 
+def _extract_explicit_supplemental_refs(text: str) -> list[tuple[str, str]]:
+    refs = []
+    for line in text.splitlines():
+        if "补充法条依据" not in line:
+            continue
+        marker_index = line.find("补充法条依据")
+        refs_after_marker = _extract_law_refs(line[marker_index:])
+        context_refs = refs_after_marker or _extract_law_refs(line[max(0, marker_index - 60):marker_index])
+        for ref in context_refs:
+            if ref not in refs:
+                refs.append(ref)
+    return refs
+
+def _find_supplemental_law_refs(raw_audit: str, retrieved_laws: str) -> list[tuple[str, str]]:
+    supplemental_refs = []
+    for _, _, block in _split_risk_blocks(raw_audit):
+        explicitly_supplemental_refs = set(_extract_explicit_supplemental_refs(block))
+        for law_name, article in _extract_law_refs(block):
+            ref = (law_name, article)
+            if ref in explicitly_supplemental_refs or not _retrieved_laws_contain_ref(retrieved_laws, law_name, article):
+                if ref not in supplemental_refs:
+                    supplemental_refs.append(ref)
+    return supplemental_refs
+
+def _extract_article_text_from_law_text(law_text: str, article: str) -> str:
+    pattern = rf"(?m)^第{re.escape(article)}条[　 \t]?[\s\S]*?(?=^第{ARTICLE_NUM_PATTERN}条[　 \t]?|^第{ARTICLE_NUM_PATTERN}章[　 \t]?|\Z)"
+    match = re.search(pattern, law_text)
+    return match.group(0).strip() if match else ""
+
+def _lookup_law_article_text(law_name: str, article: str) -> tuple[str, str]:
+    laws_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "laws")
+    if not os.path.isdir(laws_dir):
+        return "", ""
+    candidates = []
+    for file_name in os.listdir(laws_dir):
+        file_path = os.path.join(laws_dir, file_name)
+        if not os.path.isfile(file_path) or os.path.splitext(file_name)[1].lower() not in [".docx", ".pdf", ".txt"]:
+            continue
+        normalized_source = _normalize_law_name(file_name)
+        if law_name == normalized_source or law_name in normalized_source or normalized_source in law_name:
+            candidates.append((file_name, file_path))
+    for file_name, file_path in candidates:
+        try:
+            article_text = _extract_article_text_from_law_text(extract_contract_text(file_path), article)
+        except Exception:
+            article_text = ""
+        if article_text:
+            return file_name, article_text
+    return "", ""
+
 def _format_supplemental_refs_section(raw_audit: str, retrieved_laws: str) -> str:
-    missing_supplements = _find_missing_supplemental_refs(raw_audit, retrieved_laws)
-    if not missing_supplements:
+    supplemental_refs = _find_supplemental_law_refs(raw_audit, retrieved_laws)
+    if not supplemental_refs:
         return ""
-    lines = ["## 四、 补充法条标注说明", "以下法条未出现在本次 RAG 检索参考依据中，报告正文如未逐项标明“补充法条依据”，统一按补充法条依据处理："]
-    lines.extend(f"- {ref}（补充法条依据）" for ref in missing_supplements[:12])
+    lines = [
+        "## 四、 补充法条依据全文",
+        "以下为报告正文中引用但未出现在本次 RAG 初始检索结果中的法条，或由 AI 标注为“补充法条依据”的条文。系统已从本地法条库按法名和条号检索并尽量补充原文："
+    ]
+    for idx, (law_name, article) in enumerate(supplemental_refs, 1):
+        source, article_text = _lookup_law_article_text(law_name, article)
+        lines.append(f"### {idx}. 《{law_name}》第{article}条（补充法条依据）")
+        if article_text:
+            quoted_article = article_text.replace("\n", "\n> ")
+            lines.append(f"- **来源**: {source}")
+            lines.append(f"> {quoted_article}")
+        else:
+            lines.append("- **来源**: 未在本地法条库中精确匹配到该条原文，请人工补充或将对应法规文件加入 `data/laws/` 后重新生成报告。")
     return "\n".join(lines)
 
 def _extract_declared_risk_counts(raw_audit: str) -> dict[str, int]:
     preface = raw_audit.split("#### 【", 1)[0]
+    normalized_preface = re.sub(r"[*_`]", "", preface)
+    normalized_preface = re.sub(r"\s+", " ", normalized_preface)
     counts = {}
     for level in ["高风险", "中风险", "低风险"]:
-        match = re.search(rf"{level}(?:项|违规|优化建议)?\s*[:：]?\s*(\d+)\s*项|(\d+)\s*项{level}", preface)
+        match = re.search(rf"{level}(?:项|违规|优化建议)?\s*[:：]?\s*(\d+)\s*项|(\d+)\s*项{level}", normalized_preface)
         if match:
             counts[level] = int(match.group(1) or match.group(2))
     return counts
@@ -97,6 +191,23 @@ def _feedback_is_only_supplemental_marking(feedback: str) -> bool:
     ]
     return not any(re.search(pattern, feedback) for pattern in blocking_patterns)
 
+def _feedback_is_only_nonblocking_optimization(feedback: str) -> bool:
+    if "【未通过审核】" not in feedback:
+        return False
+    blocking_patterns = [
+        r"试用期.{0,12}上限",
+        r"最低工资标准具体金额|未核实的最低工资",
+        r"风险数量|风险总数|声明.{0,12}实际",
+        r"遗漏.{0,20}(高风险|中风险|核心|强制性义务|工资|社保|社会保险|加班|工时|工伤|三期|女职工|孕期|产期|哺乳|违约金|解除|竞业)",
+        r"应列为.{0,12}高风险|调整为.{0,12}高风险|升为.{0,12}高风险|低风险.{0,12}(重新评级|调整|升).*高风险|降为.{0,12}低风险",
+        r"不存在|捏造|虚构|编造|方向错误|明显错误|法条引用错误|重复计项|完全重复",
+        r"严重违法事项|剥夺劳动者核心权利",
+    ]
+    nonblocking_patterns = [
+        r"标题|措辞|表述|更精确|更精准|补充说明|计算过程|格式统一|编号|可读性|示范条款|低风险项标题|保持原内容不变|非阻塞",
+    ]
+    return any(re.search(pattern, feedback) for pattern in nonblocking_patterns) and not any(re.search(pattern, feedback) for pattern in blocking_patterns)
+
 def _detect_audit_quality_issues(raw_audit: str, retrieved_laws: str, contract_text: str = "") -> list[str]:
     issues = []
     risk_blocks = _split_risk_blocks(raw_audit)
@@ -113,9 +224,6 @@ def _detect_audit_quality_issues(raw_audit: str, retrieved_laws: str, contract_t
         issues.append("一年期劳动合同试用期上限应为二个月，不是一个月。")
     if "其他法律风险摘要" in raw_audit or "不在上述风险评级" in raw_audit:
         issues.append("不得将实质性违法点放入不计入评级的其他摘要栏目。")
-    if re.search(r"最低工资标准.{0,30}假设|假设.{0,30}最低工资标准|最低工资标准.{0,20}\d+\s*元", raw_audit):
-        issues.append("不得使用未核实的最低工资标准具体金额作为风险依据；除非该数值来自检索依据，否则应表述为“以当地最新公布标准为准”。")
-
     for level, title, block in risk_blocks:
         if not re.search(r"\*\*(违规条款|审查依据|问题描述|条款|法律分析|风险分析|依据|违规依据|建议修改后条款|优化建议)", block):
             issues.append(f"{title} 缺少必要的审查依据、法律分析或建议修改内容。")
@@ -167,27 +275,24 @@ def auditor_node(state: AgentState) -> Dict[str, Any]:
 {state.get('feedback', '暂无。这是第一轮初审，请输出全面细致的审查草稿。')}
 
 【审查要求】:
-1. 优先依据【参考的劳动法律法规条款依据】逐条核对合同条款。
-2. 如果某个结论使用了未出现在参考依据中的法律条文，建议在该风险项中紧跟该法条标明“补充法条依据”；如正文漏标，系统会在最终报告末尾统一追加补充法条标注说明，不需要仅因此整篇返工。
-3. 将审查出的隐患明确分为：【高风险】、【中风险】、【低风险】三档；没有明确违法事实的，不得强行判定风险。
-4. 对每个违规点，必须精确引用对应的法条序号（如：《劳动合同法》第十九条）。
-5. 针对每一个违规点，给出具体的、符合法律要求的“建议修改后条款”。
-6. 如果合同整体合规，应明确输出“未发现高风险/中风险违规项”，只列出必要的低风险优化建议。
-7. 试用期上限必须严格按《劳动合同法》第十九条判断：三个月以上不满一年不得超过一个月；一年以上不满三年不得超过二个月；三年以上固定期限和无固定期限不得超过六个月。因此，一年期劳动合同试用期上限是二个月，不是一个月；三年固定期限劳动合同约定六个月试用期不得仅因“三年整”表述判定为风险。
-8. 合同已明确约定某项法定内容时，不得仅因表达不够详细就升格为中风险；可作为低风险优化建议。
-9. 高风险仅限于明显违反强制性法律规定、剥夺劳动者核心权利或可能导致条款无效/行政处罚/重大赔偿的情形。
-10. 中风险必须同时满足：合同存在明确不利于劳动者的具体安排，且该安排可能导致用人单位承担较明确的败诉、赔偿或行政责任。
-11. 下列情形默认只能列为【低风险优化建议】，除非合同另有明显违法表述：法定代表人信息空缺但甲方名称住所清楚；休息休假条款重复；保密范围不够细；试用期工资已高于80%但未完整复述“同岗位最低档工资”；工作地点含业务出差区域但未授权甲方单方永久变更常驻城市。
-12. 销售、技术、HR等岗位如因业务需要存在短期出差、客户拜访、项目现场支持，不得直接认定为中风险；只有出现“甲方可单方调整工作地点/常驻城市且劳动者必须服从”等重大变更授权时，才可评为中风险。
-13. 社会保险缴纳、加班工资、工资按月足额支付、违法违约金、任意解除、工伤责任转嫁、女职工特殊保护、试用期上限等强制性义务，如合同存在明确违反表述，必须列入正式【高风险】或【中风险】风险项，不得放入“不计入评级”“其他摘要”“补充提示”等非正式栏目。
-14. 以下明确违法表述原则上应判为【高风险】：以补贴替代或放弃社会保险；免除加班工资；工资可跨月或跨季度延期支付；要求劳动者承担普通离职违约金；将工伤、疾病或职业伤害责任转嫁给劳动者；约定孕期、产期、哺乳期可解除或降低待遇；赋予甲方无法定事由的任意解除权。
-15. 单方调整工作地点、跨城市调动且劳动者不得拒绝，通常评为【中风险】；只有同时绑定违法解除、降薪、违约金、处罚或严重剥夺劳动条件时，才可升为【高风险】。
-16. 同一违法事实不得重复计入多个风险等级；例如“工伤责任转嫁”已经作为高风险评价时，不得再作为中风险重复列项。
-17. 工时和加班风险项必须引用《劳动法》第三十六条、第四十一条、第四十四条等对应依据；不得仅引用工资支付条款替代工时限制依据。
-18. 餐饮门店合同中，要求劳动者自行承担防滑鞋、手套、口罩等劳动防护用品，以及健康证、体检费、岗前培训费的，应列为正式风险项或优化建议，不得遗漏。
-19. 不得写死地方最低工资标准具体金额，除非该金额明确来自【参考的劳动法律法规条款依据】；否则统一表述为“不得低于用人单位所在地最低工资标准（以当地最新公布标准为准）”。
-20. 禁止输出“其他法律风险摘要（不在上述风险评级中）”之类栏目；所有实质性违法点必须纳入风险项总数。
-21. 如果上一轮 Critic 给出修正指令，必须逐条落实，不得重复原有问题。
+1. 审查定位：你只审查中国劳动合同合规问题，不做通用商业合同点评。优先依据【参考的劳动法律法规条款依据】逐条核对合同原文；没有明确违法事实的，不得为了凑数量强行判定风险。
+2. 风险分级：高风险用于明显违反强制性规定、剥夺劳动者核心权利、可能导致条款无效、行政处罚或重大赔偿的问题；中风险用于明确不利于劳动者且有较明确败诉、补偿或整改风险的问题；低风险仅用于表述优化、证据留痕、程序完善或合同完整性补充。
+3. 核心强制义务：社会保险缴纳、加班工资、工资按月足额支付、违法违约金、任意解除、工伤责任转嫁、女职工特殊保护、试用期上限等强制性义务，如合同存在明确违反表述，必须列入正式【高风险】或【中风险】风险项，不得放入“不计入评级”“其他摘要”“补充提示”等非正式栏目。
+4. 明确高风险：以现金补贴替代或放弃社会保险；免除加班工资；工资可跨月或跨季度延期支付；要求劳动者承担普通离职违约金；将工伤、疾病或职业伤害责任转嫁给劳动者；约定孕期、产期、哺乳期可解除或降低待遇；赋予甲方无法定事由的任意解除权，原则上判为【高风险】。
+5. 试用期：必须严格按《劳动合同法》第十九条判断。三个月以上不满一年不得超过一个月；一年以上不满三年不得超过二个月；三年以上固定期限和无固定期限不得超过六个月。一年期合同试用期上限是二个月；六个月合同可以约定不超过一个月的试用期；三年整固定期限合同约定六个月试用期不得仅因“三年整”判定违法。
+6. 工资与最低工资：不得臆测地方最低工资标准，不得写“某地最低工资通常高于/低于某金额”，也不得写“现行/2026年/当地最低工资为XXXX元”等地方最低工资具体金额。除非具体金额明确来自【参考的劳动法律法规条款依据】或合同原文，否则只写“不得低于劳动合同履行地最新公布的最低工资标准”。可以写明根据合同金额直接计算出的结果，例如“转正工资24000元的80%为19200元”。离职当月不支付绩效、奖金、提成等浮动报酬，通常作为中风险或并入工资支付风险；只有明确拒付已提供正常劳动对应的基本工资、最低工资或已确定应发工资时，才列为高风险。
+7. 工时与加班：工时和加班风险项应引用《劳动法》第三十六条、第四十一条、第四十四条等对应依据；不得仅引用工资支付条款替代工时限制依据。不得把“超长工时、强制加班、加班费包干/未支付加班费”拆成多个重复高风险，原则上合并为一个工时与加班风险项。
+8. 工作地点与单方变更：销售、技术、HR等岗位如因业务需要存在短期出差、客户拜访、项目现场支持，不得直接认定为中风险；只有出现“甲方可单方调整常驻城市/长期驻场且劳动者必须服从”等重大变更授权时，才列为风险。若同时绑定违法解除、降薪、违约金、处罚或“拒绝视为离职/严重违纪”，应合并为一个【高风险】单方变更劳动合同核心条款及违法解除风险项。
+9. 重复计项控制：同一违法事实不得重复计入多个风险等级。同一条款同时涉及“拒绝调岗视为离职”“客户要求优先于合同”“项目结束当然终止”的，应围绕共同法益合并；社保替代可说明工伤保险待遇风险，但只有合同明示“工伤自负”“职业伤害责任由劳动者承担”等责任转嫁表述时，才单独列为工伤责任转嫁高风险。
+10. 法条引用：每个风险项必须精确引用对应法条序号。引用未出现在参考依据中的真实法条时，可在该风险项标明“补充法条依据”；如正文漏标，系统会在最终报告末尾自动检索本地法条库并追加“补充法条依据全文”，不得仅因补充标注问题整篇返工。不要自行编造法条全文。不得泛泛引用《专利法》《著作权法》《民法典》等无具体条号的法律名称；如不能精确到条号，应改为事实分析或提示需人工补充依据。写出竞业限制经济补偿30%、最低工资、社平工资、缴费基数等具体裁判或地方标准时，必须有参考依据或明确法条来源；否则只写“依法按月支付经济补偿”或“以最新公布标准为准”。
+11. 修改建议：每个风险项必须给出可直接替换的“建议修改后条款”。建议条款不得引入新的违法点，不得写死动态标准，不得让劳动者放弃法定权利。合同整体合规时，应明确输出“未发现高风险/中风险违规项”，只列必要低风险优化建议。
+12. 场景适配：必须以当前合同文本的行业、岗位和工作模式为准，不得套用上一份合同或示例行业。餐饮门店合同重点关注工时排班、后厨/传菜/清洁劳动保护、健康证和体检费用、工资压付、罚款扣款、社保替代、工伤事故；互联网/研发/科技合同重点关注项目责任制、996/值班上线排障、特殊工时审批、加班费包干、培训服务期、竞业限制、知识产权归属、开源/个人作品、绩效淘汰、异地/客户现场驻场和工资扣减。
+13. 外包/项目制/客户单位管理：重点审查是否以外包、项目人员、自主择业等名义规避劳动关系或用工主体责任；是否由客户单位直接安排岗位、地点、时间、纪律和考核；是否将客户确认或项目回款作为工资支付前提；是否将客户项目结束、客户不满意作为当然解除或终止条件；是否让劳动者自行承担社保、工伤、税费和商业保险；是否让客户单位要求优先于劳动合同。
+14. 销售岗位：重点审查提成结算、回款条件、客户投诉、离职后提成、风险保证金、销售费用、外勤不定时工时、客户拜访和常驻城市调整。提成可约定客观、明确、可核验的结算条件，客户回款可作为合理结算条件之一，但不得无限期拖延、由甲方单方任意认定，或因离职、被辞退、客户投诉、后续退货等不确定事项一概取消已达成结算条件的提成；不得设置风险保证金、押金或从工资提成中单方抵扣坏账、客户投诉、市场费用。
+15. 销售岗位风险合并：不得将未完成销售目标、拜访量、回款任务或客户反馈不积极直接等同于旷工或严重违纪。若合同同时将业绩未达标按旷工处理、又将业绩未达标作为严重违纪解除，原则上合并为一个“业绩考核违法替代考勤/严重违纪认定”风险项。销售必要业务费用、差旅、交通、通讯、住宿、客户拜访等履职成本被原则上转嫁给劳动者时，通常列为中风险或低风险优化；只有绑定扣罚、拒付工资、保证金抵扣或违法解除时才升为高风险。
+16. 研发/科技岗位专项：培训服务期只有在用人单位提供专项培训费用并进行专业技术培训时才可约定；入职培训、导师带教、内部分享、项目实践通常不构成专项培训。竞业限制应审查人员范围、业务范围、期限、地域、经济补偿和违约金合理性。知识产权条款不得无差别占有劳动者离职后、非职务、未使用单位资源完成的个人作品、开源项目或通用技能成果；若无法精确引用知识产权相关条文，应以劳动合同条款合理性和职务成果边界分析为主，不得泛泛引用无条号法律。末位淘汰、绩效排名、代码量、Bug数量、客户/业务评价不得直接作为立即解除且无补偿的依据。
+17. 低风险与合并克制：合同已明确约定某项法定内容时，不得仅因表达不够详细就升格为中风险；法定代表人信息空缺但甲方名称住所清楚、休息休假条款重复、保密范围不够细、劳动保护/劳动条件表述笼统等，通常作为低风险优化，除非直接绑定违法解除、扣罚工资、剥夺法定假期或拒绝提供安全条件。劳动者对违法条款作出的概括确认、同意、承诺、放弃等表述，通常作为前述违法条款无效的补充分析，不单独计为新的高风险；只有该条款本身另行设置独立处罚、违约金、解除或赔偿责任时，才单独列项。
+18. 返工落实：如果上一轮 Critic 给出修正指令，必须逐条落实，不得重复原有问题。禁止输出“其他法律风险摘要（不在上述风险评级中）”之类栏目；所有实质性违法点必须纳入风险项总数。
 
 【输出格式】:
 - 直接从“### 一、整体合规性结论”开始。
@@ -228,6 +333,9 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
 
 你的职责是做劳动合同专项复核，而不是通用合同复核。程序质量闸门只负责格式、数量一致性、补充法条尾注和少数机器可判定底线；劳动法实质判断由你负责。
 
+【待审查合同原文】:
+{state['contract_text']}
+
 【Auditor 初步审查草稿】:
 {state['raw_audit']}
 
@@ -235,19 +343,25 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
 {state['retrieved_laws']}
 
 【劳动合同专项复核评分表】:
-1. 事实覆盖完整性：是否覆盖劳动合同期限、试用期、工作内容与地点、工时休假、劳动报酬、社会保险、劳动保护、解除终止、违约责任、女职工保护、工伤责任等劳动合同核心模块。
-2. 强制性义务识别：是否准确识别放弃或替代社保、免除加班费、工资跨月压付或无故拖欠、普通离职违约金、任意解除、工伤责任转嫁、三期女职工解除或降待遇、违法试用期等劳动法强制性问题。
-3. 风险等级合理性：高风险用于明显违反强制性规定、剥夺劳动者核心权利或可能导致行政处罚/重大赔偿/条款无效的问题；中风险用于明确不利安排且有较明确败诉或赔偿风险的问题；低风险仅用于表述优化、证据留痕、程序完善等非核心违法问题。不得把工资拖欠、社保替代、免除加班费、工伤责任转嫁、三期解除、违法违约金、任意解除等降为低风险。
-4. 法条准确性：引用法条必须真实、方向正确；对真实存在但未出现在参考依据中的法条，如正文未标注“补充法条依据”，不需要仅因此要求返工，系统会在最终报告末尾统一追加补充法条标注说明。
-5. 修改建议可执行性：建议条款应能直接替换合同条款，不得引入新的违法点；涉及最低工资、地方标准等动态事项时，不得编造、假设或写死具体数值。除非该数值明确来自参考依据，否则应表述为“以当地最新公布标准为准”。
-6. 结构与可读性：每个风险项应包含违规条款/审查依据、法律分析或风险分析、依据、建议修改后条款；风险总数应与具体条目一致；不得输出寒暄、身份声明或“其他法律风险摘要（不计入评级）”。
-7. 重复与拆分合理性：同一违法事实不得重复计入多个风险等级；但不同法益的问题可以拆分，例如“免除加班费”和“超长工时”可以分项，也可以合并，只要总数和分析自洽。
-8. 劳动合同场景适配：餐饮门店劳动合同应特别关注长工时、节假日排班、后厨/传菜/清洁劳动保护、健康证和体检费用、工伤事故、工资压付、罚款扣款、社保替代、女职工特殊保护等高频劳动争议点。
+1. 事实覆盖完整性：是否覆盖劳动合同期限、试用期、工作内容与地点、工时休假、劳动报酬、社会保险、劳动保护、解除终止、违约责任、女职工保护、工伤责任等核心模块；是否遗漏当前场景的高频争议点。
+2. 强制性义务识别：是否准确识别放弃或替代社保、免除加班费、工资拖欠或克扣、普通离职违约金、任意解除、工伤责任转嫁、三期女职工解除或降待遇、违法试用期等劳动法强制性问题。
+3. 风险等级合理性：高风险用于明显违反强制性规定、剥夺劳动者核心权利或可能导致行政处罚/重大赔偿/条款无效的问题；中风险用于明确不利安排且有较明确败诉或赔偿风险的问题；低风险仅用于表述优化、证据留痕、程序完善等非核心违法问题。不得把工资拖欠、社保替代、免除加班费、违法违约金、任意解除等降为低风险，也不得把单纯表述不完整过度升为高风险。
+4. 法条准确性：引用法条必须真实、法名和条号方向正确。真实存在但未出现在参考依据中的法条，如正文未标注“补充法条依据”，不需要仅因此要求返工，系统会在最终报告末尾自动检索本地法条库并追加“补充法条依据全文”。如果法条名称、条号或法律效果明显错误，则应要求返工。不得泛泛引用无具体条号的法律名称；如出现《专利法》《著作权法》《民法典》等无条号引用，应要求改为精确条文、事实分析或人工补充依据。
+5. 修改建议可执行性：建议条款应能直接替换合同条款，不得引入新的违法点；涉及最低工资、社平工资、地方缴费基数、竞业限制补偿30%等动态事项或裁判规则时，不得编造、假设或写死具体数值。除非该数值明确来自参考依据、补充法条或合同内可直接计算，否则应表述为“以劳动合同履行地最新公布标准为准”或“依法按月支付经济补偿”。如 Auditor 写出“现行/2026年/当地最低工资为XXXX元”等未由参考依据支持的地方最低工资具体金额，应要求返工改为“劳动合同履行地最新公布的最低工资标准”。
+6. 结构与可读性：每个风险项应包含违规条款/审查依据、法律分析或风险分析、依据、建议修改后条款；风险总数应与具体条目一致；不得输出寒暄、身份声明、横向分隔线泛滥或“其他法律风险摘要（不计入评级）”。
+7. 重复与合并：同一违法事实不得重复计入多个风险等级；工时与加班、业绩考核与违纪解除、单方调岗与拒绝即离职、客户管理介入与外包混同等同一组法益，应优先合并成一个风险项，除非合同存在不同法益的独立违法事实。劳动者概括确认、同意、承诺、放弃前述违法条款的，通常并入前述违法条款分析，不单独计高风险。离职当月不支付绩效、奖金、提成等浮动报酬，通常作为中风险或并入工资支付风险；只有拒付基本工资、最低工资或已确定应发工资时，才支持高风险。
+8. 场景适配：必须以当前合同文本的行业、岗位和工作模式为准。餐饮、互联网/研发、销售、外包/项目制合同各有专项高频风险，不得把其他测试合同或示例行业带入当前审查。
+9. 外包混同复核：如果 Auditor 同时列出客户/甲方可随时调整工作地点、岗位、时间，客户单位要求优先于劳动合同，乙方拒绝视为主动离职等风险项，应要求合并为一个【高风险】客户管理介入、单方变更劳动合同核心条款及违法解除风险项；若修改建议未明确删除“拒绝视为主动离职/严重违纪”，应要求返工。
+10. 销售岗位复核：提成结算条件应客观、明确、可核验；客户回款可以作为合理结算条件之一，但不得无限期拖延、由甲方单方任意认定或因离职、被辞退、客户投诉、后续退货等不确定事项一概取消已达成结算条件的提成。不得设置风险保证金、押金或从工资提成中单方抵扣坏账、客户投诉、市场费用。业绩未达标按旷工处理和业绩未达标直接严重违纪解除应原则上合并。
+11. 研发/科技岗位复核：项目责任制、值班上线排障、特殊工时审批、加班费包干、培训服务期、竞业限制、知识产权归属、开源/个人作品、绩效淘汰、异地或客户现场长期驻场、工资扣减均应重点复核。不得遗漏“非职务/未使用单位资源作品全部归单位”“入职培训包装成专项培训服务期”“末位淘汰立即解除”等典型风险；但知识产权条款如无法精确引用条号，应要求改为劳动合同合理性与职务成果边界分析，避免无条号泛引。
+12. 试用期建议准确性：六个月劳动合同的试用期上限为一个月，不能把“试用期三个月违法”修正为“根据法律规定不得约定试用期”；两年合同试用期上限为二个月；三年整固定期限合同可约定不超过六个月试用期。
 
 【输出规范】：
 - 只有在风险等级、法条引用、输出格式、修改建议均合格时，才可在回复最开头直接输出：“【通过审核】”，无需输出其他修改意见；仅存在补充法条依据漏标时，也视为可通过。
+- 如果只存在标题措辞、表述更精确、示范条款可读性、非关键法条补充、计算过程说明、格式统一等不影响法律结论和风险数量的优化建议，应输出“【通过审核】”，可在其后附“非阻塞优化建议”，不得要求返工。
 - 如果你发现其中有任何不严谨、法条引用有误、或修改意见不妥之处，请详细写下具体的“修正指令”，以便 Auditor 重新校对。
 - 如果未通过，请优先指出劳动合同实质问题，不要只围绕格式措辞；修正指令应能指导 Auditor 直接改写风险项。
+- 不要输出“好的”“作为……智能体”“我已收到”等寒暄或身份声明，直接从“【未通过审核】”或“【通过审核】”开始。
 """
 
     response = client.chat.completions.create(
@@ -262,6 +376,8 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
         feedback = "【未通过审核】\n" + "\n".join(f"{idx + 1}. {issue}" for idx, issue in enumerate(deterministic_issues)) + "\n" + feedback.replace("【通过审核】", "")
     elif _feedback_is_only_supplemental_marking(feedback):
         feedback = "【通过审核】\n仅存在补充法条依据漏标，最终报告将自动追加补充法条标注说明。"
+    elif _feedback_is_only_nonblocking_optimization(feedback):
+        feedback = "【通过审核】\n仅存在不影响法律结论、风险等级和风险数量的非阻塞优化建议，本轮不再返工。"
 
     return {
         "feedback": feedback
@@ -273,7 +389,7 @@ def report_generator_node(state: AgentState) -> Dict[str, Any]:
     接收最终通过的草稿，剔除中间调试及反思标记，格式化为最终版报告。
     """
     revision_rounds = max(state['loop_count'] - 1, 0)
-    unresolved_feedback = state.get("feedback", "") if "【未通过审核】" in state.get("feedback", "") else ""
+    unresolved_feedback = _clean_feedback_text(state.get("feedback", "")) if "【未通过审核】" in state.get("feedback", "") else ""
     review_status = "双智能体（Auditor & Critic）协同会审完毕，报告已完成反思审计"
     supplemental_refs_section = _format_supplemental_refs_section(state["raw_audit"], state["retrieved_laws"])
     extra_sections = []
