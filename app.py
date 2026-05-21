@@ -42,6 +42,7 @@ def _clean_highlight_candidate(text: str) -> str:
     text = re.sub(r"\*\*|`|^[-*]\s*", "", text).strip()
     # 去掉“合同原文：”“违规条款：”等标签，只保留实际候选片段
     text = re.sub(r"^(合同原文|违规条款|问题条款|原文摘录|风险条款|涉及条款|条款内容)\s*[:：]\s*", "", text)
+    text = re.sub(r"^片段\s*\d+\s*[:：]\s*", "", text)
     # 去掉外围引号、冒号、逗号和句末标点，提升与合同正文的精确匹配率
     return text.strip(" \t\r\n\u201c\u201d\"\u2018\u2019\uff1a:\uff0c,\u3002\uff1b;\u3001")
 
@@ -123,7 +124,7 @@ def _extract_risk_highlight_candidates(report_text: str) -> list[tuple[str, str]
     heading_pattern = re.compile(r"(?m)^\s*(?:#{1,6}\s*)?(?:\*\*)?【(高风险|中风险|低风险)】[^\n]*")
     matches = list(heading_pattern.finditer(report_text or ""))
     # 在风险块内部查找模型输出的“合同原文：...”等字段
-    label_pattern = re.compile(r"(?:\*\*)?(合同原文|违规条款|问题条款|原文摘录|风险条款|涉及条款|条款内容)(?:\*\*)?\s*[:：]\s*(.*)")
+    label_pattern = re.compile(r"(?:\*\*)?合同原文(?:\*\*)?\s*[:：]\s*(.*)")
     for index, match in enumerate(matches):
         level = match.group(1)
         # 当前风险块范围：从当前标题结束到下一个风险标题开始
@@ -134,7 +135,7 @@ def _extract_risk_highlight_candidates(report_text: str) -> list[tuple[str, str]
         for line_index, line in enumerate(block_lines):
             label_match = label_pattern.search(line)
             if label_match:
-                inline_text = label_match.group(2)
+                inline_text = label_match.group(1)
                 following = []
                 for next_line in block_lines[line_index + 1:]:
                     stripped_next_line = next_line.strip()
@@ -150,24 +151,12 @@ def _extract_risk_highlight_candidates(report_text: str) -> list[tuple[str, str]
                 combined_candidate = " ".join(part for part in [inline_text.strip(), *following] if part)
                 if combined_candidate:
                     block_candidates.append(combined_candidate)
-        if not block_candidates:
-            # 如果模型没按字段输出，则退化提取引号中的短片段
-            for quoted in re.findall(r"[“”\"\'\u201c\u201d\u2018\u2019]{1}([^“”\"\'\u201c\u201d\u2018\u2019]{4,220})[“”\"\'\u201c\u201d\u2018\u2019]{1}", block):
-                block_candidates.append(quoted)
-        # 拆分同一行中用顿号/逗号串联的多段引号，如 "A"、"B"、"C" -> 分别提取 A, B, C
-        expanded_candidates = []
-        for cand in block_candidates:
-            sub_quotes = re.findall(r"[\u201c\u201d\"\u2018\u2019]{1}([^\u201c\u201d\"\u2018\u2019]{4,220})[\u201c\u201d\"\u2018\u2019]{1}", cand)
-            if len(sub_quotes) > 1:
-                expanded_candidates.extend(sub_quotes)
-            expanded_candidates.append(cand)
-        block_candidates = expanded_candidates
         for candidate in block_candidates:
             # 排除明显不是合同原文的法律名称或修改建议
             candidate = _clean_highlight_candidate(candidate)
             if not candidate or any(keyword in candidate for keyword in ["劳动合同法", "劳动法", "建议修改", "修改后条款"]):
                 continue
-            for fragment in _expand_highlight_fragments(candidate):
+            for fragment in re.split(r"[。！？!?；;\n]", candidate):
                 fragment = _clean_highlight_candidate(fragment)
                 # 过短容易误高亮，过长通常难以精确匹配
                 if 8 <= len(fragment) <= 220:
