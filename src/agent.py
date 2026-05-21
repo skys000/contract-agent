@@ -21,35 +21,63 @@ MAX_REFLECTION_ROUNDS = 5
 ARTICLE_NUM_PATTERN = r"[一二三四五六七八九十百千万零〇两\d]+"
 
 def _get_llm_client() -> OpenAI:
+    """
+    创建 OpenAI 兼容协议的大模型客户端，统一读取新旧两套环境变量。
+    """
+    # 优先读取通用 LLM_* 配置，兼容历史 DEEPSEEK_* 配置
     api_key = os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
     base_url = os.getenv("LLM_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL")
     if not api_key or not base_url:
+        # 大模型是智能体审查的必要依赖，缺失时给出明确配置指引
         raise ValueError("未配置大模型 API，请在 .env 中设置 LLM_API_KEY/LLM_BASE_URL 或兼容的 DEEPSEEK_API_KEY/DEEPSEEK_BASE_URL。")
+    # 使用 OpenAI SDK 的兼容协议接口连接 DeepSeek 或其他兼容服务
     return OpenAI(
         api_key=api_key,
         base_url=base_url
     )
 
 def _get_chat_model_name() -> str:
+    """
+    获取聊天模型名称，兼容 `CHAT_MODEL_NAME` 与旧版 `DEEPSEEK_MODEL_NAME`。
+    """
+    # 优先使用通用模型变量，未设置时回退到旧版 DeepSeek 变量
     model_name = os.getenv("CHAT_MODEL_NAME") or os.getenv("DEEPSEEK_MODEL_NAME")
     if not model_name:
+        # 模型名缺失时无法发起 chat.completions 请求
         raise ValueError("未配置聊天模型名称，请在 .env 中设置 CHAT_MODEL_NAME 或兼容的 DEEPSEEK_MODEL_NAME。")
     return model_name
 
 def _clean_report_text(text: str) -> str:
+    """
+    清理模型输出中可能出现的寒暄、身份声明或重复引导语，保留正式报告正文。
+    """
+    # 去除首尾空白，先获得基础干净文本
     cleaned = text.strip()
+    # 移除模型常见的“好的/当然/作为专家”等开场话术
     cleaned = re.sub(r"^(好的|当然|以下是|作为专业的中国劳动法务审查专家智能体|我将依据|我已仔细阅读)[^\n]*\n+", "", cleaned)
+    # 移除重复说明“根据参考依据报告如下”等非正式报告正文
     cleaned = re.sub(r"(?m)^根据您提供的【?参考的劳动法律法规条款依据】?.*?报告如下：\s*$", "", cleaned)
+    # 再兜底清理单行“好的，...”式寒暄
     cleaned = re.sub(r"(?m)^好的，.*$", "", cleaned)
     return cleaned.strip()
 
 def _clean_feedback_text(text: str) -> str:
+    """
+    清理 Critic 反馈中的非结构化开场白，便于路由器稳定识别通过/未通过状态。
+    """
+    # 复用报告清洗逻辑，先去掉通用寒暄
     cleaned = _clean_report_text(text)
+    # Critic 有时会输出额外的“我的审计结论如下”，这里统一删除
     cleaned = re.sub(r"(?m)^我的审计结论如下：\s*$", "", cleaned)
+    # 删除过程性描述，保留可被路由器识别的审核结论
     cleaned = re.sub(r"(?m)^正在进行.*$", "", cleaned)
     return cleaned.strip()
 
 def _normalize_law_name(name: str) -> str:
+    """
+    将法规文件名、模型引用名统一归一化为系统内部可比较的法名。
+    """
+    # 优先匹配系统已知法规关键词，避免文件名后缀、年份和全称差异影响比较
     for keyword in [
         "关于企业实行不定时工作制和综合计算工时工作制的审批办法",
         "最高人民法院关于审理劳动争议案件适用法律问题的解释",
@@ -66,17 +94,25 @@ def _normalize_law_name(name: str) -> str:
     ]:
         if keyword in name:
             return keyword
+    # 未命中已知法规时，删除常见国家名前缀、年份后缀、扩展名和空白
     return re.sub(r"中华人民共和国|_\d+|\.docx|\.pdf|\.txt|\s", "", name)
 
 def _extract_law_refs(text: str) -> list[tuple[str, str]]:
+    """
+    从报告文本中抽取《法律名称》第X条形式的法律引用。
+    """
     refs = []
+    # 先定位所有《法律名称》出现的位置
     law_matches = list(re.finditer(r"《([^》]+)》", text))
     for match in law_matches:
+        # 将模型输出的法律名称归一化，便于与本地法库文件名匹配
         law_name = _normalize_law_name(match.group(1))
+        # 只检查法律名称后方近距离文本，避免跨段落误抓条号
         segment = text[match.end():match.end() + 80]
         citation_match = re.match(rf"\s*第{ARTICLE_NUM_PATTERN}条(?:\s*[、,，和及]\s*第?{ARTICLE_NUM_PATTERN}条)*", segment)
         if not citation_match:
             continue
+        # 支持“第五十八条、第六十条”这类合并引用，将每个条号拆开
         articles = re.findall(rf"第?({ARTICLE_NUM_PATTERN})条", citation_match.group(0))
         for article in articles:
             ref = (law_name, article)
@@ -85,7 +121,12 @@ def _extract_law_refs(text: str) -> list[tuple[str, str]]:
     return refs
 
 def _retrieved_laws_contain_ref(retrieved_laws: str, law_name: str, article: str) -> bool:
+    """
+    判断 RAG 初始召回内容中是否已经包含指定法名和条号。
+    """
+    # 将待查法名归一化，和 RAG 来源文本中的法名保持同一比较口径
     normalized_law = _normalize_law_name(law_name)
+    # 先定位条号，再检查条号附近是否出现对应法名
     for match in re.finditer(rf"第{article}条", retrieved_laws):
         context = retrieved_laws[max(0, match.start() - 160):match.end() + 160]
         if normalized_law in context:
@@ -93,33 +134,50 @@ def _retrieved_laws_contain_ref(retrieved_laws: str, law_name: str, article: str
     return False
 
 def _split_risk_blocks(raw_audit: str) -> list[tuple[str, str, str]]:
+    """
+    将 Auditor 草稿按高/中/低风险标题切分为独立风险块，供质量门和补充法条扫描使用。
+    """
+    # 风险项标题统一使用【高风险】/【中风险】/【低风险】，这里按标题定位每个块的起点
     matches = list(re.finditer(r"(?m)^#{1,6}\s*【(高风险|中风险|低风险)】[^\n]*", raw_audit))
     blocks = []
     for idx, match in enumerate(matches):
+        # 当前风险块默认截止到下一个风险标题或全文末尾
         next_risk_start = matches[idx + 1].start() if idx + 1 < len(matches) else len(raw_audit)
+        # 若风险块内部提前出现新的一级/二级/三级章节标题，则在章节标题前截断
         next_section = re.search(r"(?m)^#{1,3}\s+", raw_audit[match.end():next_risk_start])
         end = match.end() + next_section.start() if next_section else next_risk_start
         blocks.append((match.group(1), match.group(0), raw_audit[match.start():end]))
     return blocks
 
 def _find_missing_supplemental_refs(raw_audit: str, retrieved_laws: str) -> list[str]:
+    """
+    找出报告中引用但未出现在 RAG 召回结果、且没有显式标注为补充依据的法条。
+    """
     missing_supplements = []
+    # 逐个风险块检查，避免跨风险项混淆法条引用
     for _, _, block in _split_risk_blocks(raw_audit):
+        # 先找出模型已明确标为“补充法条依据”的引用
         supplemental_refs = set(_extract_explicit_supplemental_refs(block))
         for law_name, article in _extract_law_refs(block):
             if (law_name, article) in supplemental_refs:
                 continue
             formatted_ref = f"《{law_name}》第{article}条"
+            # 若 RAG 初始依据不含该条，且模型未标补充依据，则记录为缺失标注
             if not _retrieved_laws_contain_ref(retrieved_laws, law_name, article) and formatted_ref not in missing_supplements:
                 missing_supplements.append(formatted_ref)
     return missing_supplements
 
 def _extract_explicit_supplemental_refs(text: str) -> list[tuple[str, str]]:
+    """
+    提取风险块中已由模型显式标注为“补充法条依据”的法律引用。
+    """
     refs = []
     for line in text.splitlines():
+        # 只处理包含“补充法条依据”的行，减少误抓普通依据
         if "补充法条依据" not in line:
             continue
         marker_index = line.find("补充法条依据")
+        # 优先解析标记后方引用；若模型把法条写在标记前，则回看前方 60 个字符
         refs_after_marker = _extract_law_refs(line[marker_index:])
         context_refs = refs_after_marker or _extract_law_refs(line[max(0, marker_index - 60):marker_index])
         for ref in context_refs:
@@ -128,8 +186,12 @@ def _extract_explicit_supplemental_refs(text: str) -> list[tuple[str, str]]:
     return refs
 
 def _find_supplemental_law_refs(raw_audit: str, retrieved_laws: str) -> list[tuple[str, str]]:
+    """
+    汇总最终报告需要追加原文的补充法条引用。
+    """
     supplemental_refs = []
     for _, _, block in _split_risk_blocks(raw_audit):
+        # 显式补充依据和未在 RAG 中出现的引用，都需要在最终报告末尾补全文
         explicitly_supplemental_refs = set(_extract_explicit_supplemental_refs(block))
         for law_name, article in _extract_law_refs(block):
             ref = (law_name, article)
@@ -139,70 +201,105 @@ def _find_supplemental_law_refs(raw_audit: str, retrieved_laws: str) -> list[tup
     return supplemental_refs
 
 def _extract_article_text_from_law_text(law_text: str, article: str) -> str:
+    """
+    从完整法规文本中按条号截取单条法条全文。
+    """
+    # 从目标条号截取到下一条、下一章或文件结尾，保证补充依据是完整条文
     pattern = rf"(?m)^第{re.escape(article)}条[　 \t]?[\s\S]*?(?=^第{ARTICLE_NUM_PATTERN}条[　 \t]?|^第{ARTICLE_NUM_PATTERN}章[　 \t]?|\Z)"
     match = re.search(pattern, law_text)
     return match.group(0).strip() if match else ""
 
 def _lookup_law_article_text(law_name: str, article: str) -> tuple[str, str]:
+    """
+    在本地 `data/laws` 法规库中按法名和条号精确查找法条全文。
+    """
+    # 法规原文统一放在项目 data/laws 目录
     laws_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "laws")
     if not os.path.isdir(laws_dir):
         return "", ""
     candidates = []
     for file_name in os.listdir(laws_dir):
         file_path = os.path.join(laws_dir, file_name)
+        # 只扫描当前解析器支持的法规文件
         if not os.path.isfile(file_path) or os.path.splitext(file_name)[1].lower() not in [".docx", ".pdf", ".txt"]:
             continue
+        # 将文件名归一化后与报告引用法名比较
         normalized_source = _normalize_law_name(file_name)
         if law_name == normalized_source or law_name in normalized_source or normalized_source in law_name:
             candidates.append((file_name, file_path))
         elif law_name in ["专利法", "著作权法", "计算机软件保护条例"] and "知识产权法" in file_name:
+            # 知识产权相关法规可能被合并整理到同一个本地文件中
             candidates.append((file_name, file_path))
         elif law_name == "最高人民法院关于审理劳动争议案件适用法律问题的解释" and "最高法劳动争议司法解释" in file_name:
+            # 兼容本地文件的短命名
             candidates.append((file_name, file_path))
     for file_name, file_path in candidates:
         try:
+            # 解析候选法规全文并按条号提取目标条文
             article_text = _extract_article_text_from_law_text(extract_contract_text(file_path), article)
         except Exception:
+            # 单个法规文件解析失败不影响其他候选文件继续尝试
             article_text = ""
         if article_text:
             return file_name, article_text
     return "", ""
 
 def _format_supplemental_refs_section(raw_audit: str, retrieved_laws: str) -> str:
+    """
+    生成最终报告末尾的“补充法条依据全文”章节。
+    """
+    # 找出正文中需要在尾部补充全文的法条引用
     supplemental_refs = _find_supplemental_law_refs(raw_audit, retrieved_laws)
     if not supplemental_refs:
+        # 没有补充依据时不追加额外章节
         return ""
+    # 先写入章节标题和说明，提示这些条文不是初始 RAG 直接提供的依据
     lines = [
         "## 四、 补充法条依据全文",
         "以下为报告正文中引用但未出现在本次 RAG 初始检索结果中的法条，或由 AI 标注为“补充法条依据”的条文。系统已从本地法条库按法名和条号检索并尽量补充原文："
     ]
     for idx, (law_name, article) in enumerate(supplemental_refs, 1):
+        # 按法名和条号从本地 data/laws 精确查找原文
         source, article_text = _lookup_law_article_text(law_name, article)
         lines.append(f"### {idx}. 《{law_name}》第{article}条（补充法条依据）")
         if article_text:
+            # Markdown 引用块中每一行都加 >，保证多行法条显示整齐
             quoted_article = article_text.replace("\n", "\n> ")
             lines.append(f"- **来源**: {source}")
             lines.append(f"> {quoted_article}")
         else:
+            # 查不到时明确提示人工补充，避免误以为系统已经核验全文
             lines.append("- **来源**: 未在本地法条库中精确匹配到该条原文，请人工补充或将对应法规文件加入 `data/laws/` 后重新生成报告。")
     return "\n".join(lines)
 
 def _extract_declared_risk_counts(raw_audit: str) -> dict[str, int]:
+    """
+    从报告前言中提取模型声明的高/中/低风险数量，用于和实际风险块数量做一致性校验。
+    """
+    # 只截取第一个风险项标题之前的整体结论区域，避免误抓正文风险项数量
     preface = raw_audit.split("#### 【", 1)[0]
+    # 去掉 Markdown 强调标记并压缩空白，提升正则匹配稳定性
     normalized_preface = re.sub(r"[*_`]", "", preface)
     normalized_preface = re.sub(r"\s+", " ", normalized_preface)
     counts = {}
     for level in ["高风险", "中风险", "低风险"]:
+        # 兼容“高风险：2项”和“2项高风险”等常见表述
         match = re.search(rf"{level}(?:项|违规|优化建议)?\s*[:：]?\s*(\d+)\s*项|(\d+)\s*项{level}", normalized_preface)
         if match:
             counts[level] = int(match.group(1) or match.group(2))
     return counts
 
 def _feedback_is_only_supplemental_marking(feedback: str) -> bool:
+    """
+    判断 Critic 的未通过反馈是否仅要求补充法条标注，避免非阻塞格式问题导致无限返工。
+    """
+    # 只有 Critic 明确未通过时，才需要进一步判断是否属于可放行问题
     if "【未通过审核】" not in feedback:
         return False
+    # 如果反馈不涉及补充法条依据，就不是本函数负责的可放行场景
     if "补充法条依据" not in feedback and "未出现在" not in feedback:
         return False
+    # 以下关键词代表实体法律错误或结构性问题，不能仅因“补充依据”字样而放行
     blocking_patterns = [
         r"试用期.{0,12}上限",
         r"风险等级|不得列为|应列为|升为|降为|降级",
@@ -215,8 +312,13 @@ def _feedback_is_only_supplemental_marking(feedback: str) -> bool:
     return not any(re.search(pattern, feedback) for pattern in blocking_patterns)
 
 def _feedback_is_only_nonblocking_optimization(feedback: str) -> bool:
+    """
+    判断 Critic 反馈是否仅属于低影响优化建议。
+    """
+    # 只处理带“未通过审核”的反馈；已通过反馈无需转换
     if "【未通过审核】" not in feedback:
         return False
+    # 阻塞型关键词表示会影响法律结论、风险等级或风险数量，必须返工
     blocking_patterns = [
         r"试用期.{0,12}上限",
         r"最低工资标准具体金额|未核实的最低工资",
@@ -226,32 +328,49 @@ def _feedback_is_only_nonblocking_optimization(feedback: str) -> bool:
         r"不存在|捏造|虚构|编造|方向错误|明显错误|法条引用错误|重复计项|完全重复",
         r"严重违法事项|剥夺劳动者核心权利",
     ]
+    # 非阻塞关键词通常只涉及表达、标题、可读性或示范条款优化
     nonblocking_patterns = [
         r"标题|措辞|表述|更精确|更精准|补充说明|计算过程|格式统一|编号|可读性|示范条款|低风险项标题|保持原内容不变|非阻塞",
     ]
     return any(re.search(pattern, feedback) for pattern in nonblocking_patterns) and not any(re.search(pattern, feedback) for pattern in blocking_patterns)
 
 def _feedback_is_approved(feedback: str) -> bool:
+    """
+    判断 Critic 是否明确给出通过审核结论。
+    """
+    # 通过标记必须出现在清理后文本开头，且不能同时包含未通过标记
     normalized = feedback.strip()
     return normalized.startswith("【通过审核】") and "【未通过审核】" not in normalized
 
 def _detect_audit_quality_issues(raw_audit: str, retrieved_laws: str, contract_text: str = "") -> list[str]:
+    """
+    执行确定性质量门检查，覆盖格式、风险计数、非法栏目和少量机器可判定底线规则。
+
+    该函数只做程序确定性校验，不替代 Auditor/Critic 的实体劳动法判断。
+    """
     issues = []
+    # 将报告切分成风险块，用于计数和格式检查
     risk_blocks = _split_risk_blocks(raw_audit)
+    # 提取整体结论中模型自称的风险数量
     declared_counts = _extract_declared_risk_counts(raw_audit)
+    # 统计正文中实际出现的高/中/低风险标题数量
     actual_counts = {
         "高风险": sum(1 for level, _, _ in risk_blocks if level == "高风险"),
         "中风险": sum(1 for level, _, _ in risk_blocks if level == "中风险"),
         "低风险": sum(1 for level, _, _ in risk_blocks if level == "低风险"),
     }
+    # 检查整体结论数量是否和正文实际条目一致
     mismatched_counts = [f"{level}声明{declared_counts[level]}项、实际{actual_counts[level]}项" for level in declared_counts if declared_counts[level] != actual_counts[level]]
     if mismatched_counts:
         issues.append("整体结论中的风险数量必须与下方具体风险项数量一致：" + "；".join(mismatched_counts))
+    # 对“一年期合同试用期上限”这一高频错误做确定性拦截
     if re.search(r"一年.{0,12}试用期.{0,12}上限.{0,12}一个月|一年期限合同试用期上限为一个月", raw_audit):
         issues.append("一年期劳动合同试用期上限应为二个月，不是一个月。")
+    # 禁止把实质违法点放到“不计入评级”的摘要栏目中
     if "其他法律风险摘要" in raw_audit or "不在上述风险评级" in raw_audit:
         issues.append("不得将实质性违法点放入不计入评级的其他摘要栏目。")
     for level, title, block in risk_blocks:
+        # 每个风险块必须包含依据/分析/修改建议等关键栏目，防止模型只输出标题
         if not re.search(r"\*\*(违规条款|审查依据|问题描述|条款|法律分析|风险分析|依据|违规依据|建议修改后条款|优化建议)", block):
             issues.append(f"{title} 缺少必要的审查依据、法律分析或建议修改内容。")
     return issues
@@ -337,6 +456,7 @@ def auditor_node(state: AgentState) -> Dict[str, Any]:
         temperature=0.1  # 采用低温度系数确保法理审查的严谨性与确定性
     )
     
+    # 返回 LangGraph 状态增量：初审草稿、已使用法条、循环轮数
     return {
         "raw_audit": _clean_report_text(response.choices[0].message.content),
         "retrieved_laws": retrieved_laws,
@@ -348,6 +468,7 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
     """
     负责对 Auditor 生成的初审报告草稿进行法理二次审计，防止出现幻觉（如捏造不存在的法条等）。
     """
+    # Critic 使用同一套大模型客户端，但提示词定位为复核与质量把关
     client = _get_llm_client()
     
     prompt = f"""
@@ -393,16 +514,22 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
         temperature=0.2  # 稍微允许一些发散以促进更深入的潜在风险反思
     )
     
+    # 读取 Critic 原始反馈，随后叠加程序确定性质量门
     feedback = response.choices[0].message.content
+    # 质量门用于拦截机器可判定问题，如风险数量不一致、明显错误试用期结论等
     deterministic_issues = _detect_audit_quality_issues(state["raw_audit"], state["retrieved_laws"], state["contract_text"])
     if deterministic_issues:
+        # 如果程序质量门发现问题，即使模型写了通过，也强制改写为未通过
         feedback_without_approval = re.sub(r"【\s*通过审核\s*】", "", feedback)
         feedback = "【未通过审核】\n" + "\n".join(f"{idx + 1}. {issue}" for idx, issue in enumerate(deterministic_issues)) + "\n" + feedback_without_approval
     elif _feedback_is_only_supplemental_marking(feedback):
+        # 只缺“补充法条依据”标注时不返工，最终报告阶段会自动补全文
         feedback = "【通过审核】\n仅存在补充法条依据漏标，最终报告将自动追加补充法条标注说明。"
     elif _feedback_is_only_nonblocking_optimization(feedback):
+        # 只涉及标题、措辞、可读性等非阻塞优化时放行，避免无意义循环
         feedback = "【通过审核】\n仅存在不影响法律结论、风险等级和风险数量的非阻塞优化建议，本轮不再返工。"
 
+    # 返回 LangGraph 状态增量：本轮 Critic 反馈
     return {
         "feedback": feedback
     }
@@ -412,19 +539,26 @@ def report_generator_node(state: AgentState) -> Dict[str, Any]:
     """
     接收最终通过的草稿，剔除中间调试及反思标记，格式化为最终版报告。
     """
+    # loop_count 包含首次生成，因此实际修正次数需要减一
     revision_rounds = max(state['loop_count'] - 1, 0)
+    # 判断 Critic 是否最终通过，用于确定报告状态
     approved = _feedback_is_approved(state.get("feedback", ""))
+    # 如果未通过且流程触顶，则保留未解决反馈给人工复核
     unresolved_feedback = _clean_feedback_text(state.get("feedback", "")) if not approved and "【未通过审核】" in state.get("feedback", "") else ""
     review_status = "双智能体（Auditor & Critic）协同会审完毕，报告已完成反思审计"
+    # 对正文中需要补充全文的法条，统一在报告末尾追加
     supplemental_refs_section = _format_supplemental_refs_section(state["raw_audit"], state["retrieved_laws"])
     extra_sections = []
     if supplemental_refs_section:
         extra_sections.append(supplemental_refs_section)
     if unresolved_feedback:
+        # 达到最大轮数仍未通过时，报告不丢弃，而是明确标记需人工复核
         review_status = "已达到最大反思轮数，仍存在未完全解决的质检问题，建议人工复核后使用" if state['loop_count'] >= MAX_REFLECTION_ROUNDS else "Critic 尚未通过审核，当前报告仍存在未解决质检问题，建议继续反思修正"
+        # 如果已有补充法条章节，未解决质检提示顺延为第五章
         unresolved_heading = "## 五、 未解决质检提示" if supplemental_refs_section else "## 四、 未解决质检提示"
         extra_sections.append(f"{unresolved_heading}\n{unresolved_feedback}")
     extra_sections_text = "\n\n".join(extra_sections)
+    # 组装最终 Markdown 报告，包含元数据、RAG 依据、风险明细和可选附加章节
     final_output = f"""# 劳动合同合规智能审查报告
 
 ## 一、 智能审查元数据
@@ -439,6 +573,7 @@ def report_generator_node(state: AgentState) -> Dict[str, Any]:
 {_clean_report_text(state['raw_audit'])}
 {extra_sections_text}
 """
+    # 返回最终报告字段，供 app.py 渲染和导出
     return {"final_report": final_output}
 
 # 5. 条件路由逻辑 (Router)
@@ -446,8 +581,10 @@ def check_approval_router(state: AgentState) -> str:
     """
     控制流程分支：判断是进入下一次修改还是输出报告。
     """
+    # 从共享状态中读取 Critic 反馈和当前循环轮数
     feedback = state.get("feedback", "")
     loop_count = state.get("loop_count", 0)
+    # 只有以【通过审核】开头且不含【未通过审核】时才视为通过
     approved = _feedback_is_approved(feedback)
     
     # 条件1：Critic 判定通过审核
@@ -456,6 +593,7 @@ def check_approval_router(state: AgentState) -> str:
         print(f"[Agent Workflow] 状态流转完成。通过原因: {'Critic 审核通过' if approved else '达到最大反思轮数限制'}。即将输出最终报告。")
         return "generate_report"
     else:
+        # 未通过且未达到最大轮数时，携带反馈回到 Auditor 重新生成
         print(f"[Agent Workflow] 第 {loop_count} 轮反思未通过。Critic 反馈提示: {feedback[:100]}... 即将流转回 Auditor 重新审查。")
         return "re_audit"
 

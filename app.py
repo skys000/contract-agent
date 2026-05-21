@@ -20,56 +20,152 @@ from openai import OpenAI
 
 # 将 src 目录临时加入模块查找路径
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
-from parser import extract_contract_text, desensitize_text, extract_metadata
+from parser import extract_contract_text, desensitize_text, extract_metadata, get_last_parser_message
 from database import init_db, insert_audit_log, get_kpi_metrics, get_recent_activities, get_monthly_risk_stats
 from agent import build_agent_graph, _lookup_law_article_text
 from retriever import query_laws
 
 def count_risk_items(report_text: str, level: str) -> int:
+    """
+    统计最终审查报告中指定风险等级的条目数，用于看板入库与报告一致性展示。
+    """
+    # 匹配 Markdown 标题、加粗标题和“高风险项：”等模型可能输出的标题形式
     pattern = rf"(?m)^\s*(?:#{{1,6}}\s*)?(?:\*\*)?(?:【{level}】|{level}项\s*\d+[:：]|{level}项[:：])"
     return len(re.findall(pattern, report_text))
 
 def _clean_highlight_candidate(text: str) -> str:
+    """
+    清理模型报告中用于高亮定位的候选原文片段，去除 Markdown 标记、标签名前缀与外围标点。
+    """
+    # 去掉 Markdown 加粗、行内代码和列表符号
     text = re.sub(r"\*\*|`|^[-*]\s*", "", text).strip()
+    # 去掉“合同原文：”“违规条款：”等标签，只保留实际候选片段
     text = re.sub(r"^(合同原文|违规条款|问题条款|原文摘录|风险条款|涉及条款|条款内容)\s*[:：]\s*", "", text)
+    # 去掉外围引号、冒号、逗号和句末标点，提升与合同正文的精确匹配率
     return text.strip(" \t\r\n“”\"'：:，,。；;")
 
+def _strip_clause_prefix(text: str) -> str:
+    """
+    去除报告摘录前常见的“第X条”前缀，解决报告条号与合同正文标题分离导致的漏高亮。
+    """
+    # 模型摘录经常把“第十二条：”带在片段前，而正文匹配时可能只需要条款内容
+    text = re.sub(r"^第[一二三四五六七八九十百千万零〇\d]+条\s*[：:、，,。\s“”\"']*", "", text)
+    return text.strip(" \t\r\n“”\"'：:，,。；;")
+
+def _expand_highlight_fragments(candidate: str) -> list[str]:
+    """
+    将较长的合同原文摘录扩展为多组可匹配片段。
+
+    该函数专门处理模型报告常见的条号、省略号、换行、逗号分隔等格式差异，
+    只生成合同中可能精确出现的文本片段，不做语义猜测，避免误高亮。
+    """
+    fragments = []
+    # 同时尝试原始片段和去条号前缀片段，覆盖模型输出与合同正文格式差异
+    variants = [candidate, _strip_clause_prefix(candidate)]
+    for variant in variants:
+        # 对每个变体先做标准清洗
+        variant = _clean_highlight_candidate(variant)
+        variant = _strip_clause_prefix(variant)
+        # 对“……/...”省略号进行拆分，避免模型省略中间文字后整段无法匹配
+        ellipsis_parts = [
+            _strip_clause_prefix(_clean_highlight_candidate(part))
+            for part in re.split(r"(?:…{2,}|\.{3,})", variant)
+            if _strip_clause_prefix(_clean_highlight_candidate(part))
+        ]
+        # 后续会对完整片段和省略号拆分片段继续按句子、逗号扩展
+        variants_to_split = [variant] + ellipsis_parts
+        if variant:
+            fragments.append(variant)
+        fragments.extend(ellipsis_parts)
+        for split_source in variants_to_split:
+            # 按句号、分号、换行切句，得到更短、更容易精确定位的风险片段
+            for sentence in re.split(r"[。；;\n]", split_source):
+                sentence = _strip_clause_prefix(_clean_highlight_candidate(sentence))
+                if sentence:
+                    fragments.append(sentence)
+                    # 再按逗号拆分子句，用于长句局部命中
+                    comma_parts = [
+                        _clean_highlight_candidate(part)
+                        for part in re.split(r"[，,]", sentence)
+                        if _clean_highlight_candidate(part)
+                    ]
+                    fragments.extend(comma_parts)
+                    # 相邻逗号片段重新组合，兼顾片段太短和整句太长两种问题
+                    for index in range(len(comma_parts) - 1):
+                        fragments.append(f"{comma_parts[index]}，{comma_parts[index + 1]}")
+    return fragments
+
 def _extract_risk_highlight_candidates(report_text: str) -> list[tuple[str, str]]:
+    """
+    从审查报告的高/中/低风险块中抽取可用于合同预览高亮的原文候选片段。
+
+    优先读取 `合同原文`、`违规条款` 等显式标签；若报告没有标签，再退化读取中文或英文引号中的片段。
+    """
     candidates = []
-    heading_pattern = re.compile(r"(?m)^#{1,6}\s*【(高风险|中风险|低风险)】[^\n]*")
+    # 定位每个风险项标题，并捕获风险等级作为高亮颜色依据
+    heading_pattern = re.compile(r"(?m)^\s*(?:#{1,6}\s*)?(?:\*\*)?【(高风险|中风险|低风险)】[^\n]*")
     matches = list(heading_pattern.finditer(report_text or ""))
-    label_pattern = re.compile(r"(?:\*\*)?(合同原文|违规条款|问题条款|原文摘录|风险条款|涉及条款|条款内容)(?:\*\*)?\s*[:：]\s*(.+)")
+    # 在风险块内部查找模型输出的“合同原文：...”等字段
+    label_pattern = re.compile(r"(?:\*\*)?(合同原文|违规条款|问题条款|原文摘录|风险条款|涉及条款|条款内容)(?:\*\*)?\s*[:：]\s*(.*)")
     for index, match in enumerate(matches):
         level = match.group(1)
+        # 当前风险块范围：从当前标题结束到下一个风险标题开始
         block_end = matches[index + 1].start() if index + 1 < len(matches) else len(report_text)
         block = report_text[match.end():block_end]
         block_candidates = []
-        for line in block.splitlines():
+        block_lines = block.splitlines()
+        for line_index, line in enumerate(block_lines):
             label_match = label_pattern.search(line)
             if label_match:
-                block_candidates.append(label_match.group(2))
+                inline_text = label_match.group(2)
+                if inline_text.strip():
+                    # 标签和值在同一行时，直接取冒号后的内容
+                    block_candidates.append(inline_text)
+                else:
+                    # 标签独占一行时，向后读取连续正文行，直到遇到下一个字段或空段落
+                    following = []
+                    for next_line in block_lines[line_index + 1:]:
+                        stripped_next_line = next_line.strip()
+                        if not stripped_next_line:
+                            if following:
+                                break
+                            continue
+                        if label_pattern.search(stripped_next_line):
+                            break
+                        if re.match(r"^(?:[-*]\s*)?(风险分析|法律依据|建议修改后条款|修改后条款|整改建议|优化建议)\s*[:：]", stripped_next_line):
+                            break
+                        following.append(stripped_next_line)
+                    if following:
+                        block_candidates.append(" ".join(following))
         if not block_candidates:
+            # 如果模型没按字段输出，则退化提取引号中的短片段
             for quoted in re.findall(r"[“\"]([^”\"]{8,220})[”\"]", block):
                 block_candidates.append(quoted)
         for candidate in block_candidates:
+            # 排除明显不是合同原文的法律名称或修改建议
             candidate = _clean_highlight_candidate(candidate)
             if not candidate or any(keyword in candidate for keyword in ["劳动合同法", "劳动法", "建议修改", "修改后条款"]):
                 continue
-            fragments = re.split(r"[。；;\n]", candidate)
-            for fragment in fragments:
+            for fragment in _expand_highlight_fragments(candidate):
                 fragment = _clean_highlight_candidate(fragment)
+                # 过短容易误高亮，过长通常难以精确匹配
                 if 8 <= len(fragment) <= 220:
                     candidates.append((fragment, level))
     return candidates
 
 def _find_snippet_positions(contract_text: str, snippet: str) -> list[tuple[int, int]]:
+    """
+    在合同正文中定位候选片段，先做普通精确匹配，再做去空白后的紧凑匹配。
+    """
     positions = []
+    # 第一轮使用 Python 字符串精确查找，命中时可直接得到原文位置
     start = contract_text.find(snippet)
     while start != -1:
         positions.append((start, start + len(snippet)))
         start = contract_text.find(snippet, start + len(snippet))
     if positions:
         return positions
+    # 第二轮构造“去空白合同文本”，解决 PDF/Word 解析换行打断句子的情况
     compact_chars = []
     compact_to_original = []
     for index, char in enumerate(contract_text):
@@ -78,10 +174,12 @@ def _find_snippet_positions(contract_text: str, snippet: str) -> list[tuple[int,
             compact_to_original.append(index)
     compact_contract = "".join(compact_chars)
     compact_snippet = re.sub(r"\s+", "", snippet)
+    # 过短片段在紧凑匹配中误命中概率较高，因此直接放弃
     if len(compact_snippet) < 8:
         return positions
     compact_start = compact_contract.find(compact_snippet)
     while compact_start != -1:
+        # 将紧凑文本下标映射回原始合同文本下标，保证 HTML 高亮切片正确
         original_start = compact_to_original[compact_start]
         original_end = compact_to_original[compact_start + len(compact_snippet) - 1] + 1
         positions.append((original_start, original_end))
@@ -89,32 +187,47 @@ def _find_snippet_positions(contract_text: str, snippet: str) -> list[tuple[int,
     return positions
 
 def _build_highlight_spans(contract_text: str, report_text: str) -> list[tuple[int, int, str]]:
+    """
+    根据报告候选片段构造最终高亮区间，并按风险等级优先级避免重叠覆盖。
+    """
     spans = []
     occupied = []
+    # 风险等级优先级：高风险片段优先占用位置，避免被低风险重叠覆盖
     priority = {"高风险": 0, "中风险": 1, "低风险": 2}
+    # 候选片段先去重，再按风险等级和片段长度排序；长片段优先可减少碎片化高亮
     candidates = sorted(
         set(_extract_risk_highlight_candidates(report_text)),
         key=lambda item: (priority.get(item[1], 9), -len(item[0]))
     )
     for snippet, level in candidates:
         for start, end in _find_snippet_positions(contract_text, snippet):
+            # 若新区间与已占用区间重叠，则跳过，保持最终高亮区域互不覆盖
             if not any(start < old_end and end > old_start for old_start, old_end, _ in occupied):
                 spans.append((start, end, level))
                 occupied.append((start, end, level))
+    # 按正文位置排序，便于后续从前到后拼接 HTML
     return sorted(spans, key=lambda item: item[0])
 
 def render_contract_preview(contract_text: str, report_text: str = "") -> None:
+    """
+    渲染带风险高亮的合同预览区域。
+    """
+    # 根据报告风险项生成正文高亮区间
     spans = _build_highlight_spans(contract_text, report_text)
     level_class = {"高风险": "high", "中风险": "med", "低风险": "low"}
     pieces = []
     cursor = 0
     for start, end, level in spans:
+        # 先加入高亮前的普通文本，并进行 HTML 转义防止合同内容破坏页面结构
         pieces.append(html.escape(contract_text[cursor:start]))
+        # 当前风险片段用 mark 标签包裹，并根据风险等级绑定不同 CSS class
         pieces.append(f"<mark class='risk-highlight-{level_class.get(level, 'low')}'>{html.escape(contract_text[start:end])}</mark>")
         cursor = end
+    # 加入最后一个高亮片段之后的剩余文本
     pieces.append(html.escape(contract_text[cursor:]))
     legend = ""
     if spans:
+        # 只展示当前报告实际命中的风险等级图例
         active_levels = {level for _, _, level in spans}
         legend_items = []
         if "高风险" in active_levels:
@@ -124,28 +237,43 @@ def render_contract_preview(contract_text: str, report_text: str = "") -> None:
         if "低风险" in active_levels:
             legend_items.append("<span class='legend-low'>低风险/优化</span>")
         legend = f"<div class='risk-legend'>{''.join(legend_items)}</div>"
+    # 使用 unsafe_allow_html 渲染自定义高亮样式，合同内容本身已通过 html.escape 转义
     st.markdown(f"{legend}<div class='contract-preview'>{''.join(pieces)}</div>", unsafe_allow_html=True)
 
 def _get_llm_client() -> OpenAI:
+    """
+    创建 OpenAI 兼容协议客户端，统一支持通用 LLM_* 配置与旧 DEEPSEEK_* 配置。
+    """
+    # 优先读取通用大模型配置，兼容历史 DeepSeek 配置名
     api_key = os.getenv("LLM_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
     base_url = os.getenv("LLM_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL")
     if not api_key or not base_url:
         raise ValueError("未配置大模型 API，请在 .env 中设置 LLM_API_KEY/LLM_BASE_URL 或兼容的 DEEPSEEK_API_KEY/DEEPSEEK_BASE_URL。")
+    # OpenAI SDK 支持 base_url，因此可连接任意 OpenAI 兼容供应商
     return OpenAI(
         api_key=api_key,
         base_url=base_url
     )
 
 def _get_chat_model_name() -> str:
+    """
+    读取聊天模型名称，兼容新旧环境变量命名。
+    """
+    # 优先使用通用模型名，未配置时回退到旧 DEEPSEEK_MODEL_NAME
     model_name = os.getenv("CHAT_MODEL_NAME") or os.getenv("DEEPSEEK_MODEL_NAME")
     if not model_name:
         raise ValueError("未配置聊天模型名称，请在 .env 中设置 CHAT_MODEL_NAME 或兼容的 DEEPSEEK_MODEL_NAME。")
     return model_name
 
 def _extract_law_reference_pairs(text: str) -> list[tuple[str, str]]:
+    """
+    从法律咨询首轮回答中提取“法律名称 + 条号”组合，支持一处引用多个条号。
+    """
     references = []
+    # 匹配《法律名称》第X条，并兼容后续追加“、第Y条、第Z条”
     pattern = re.compile(r"《([^》]{2,40})》\s*第([一二三四五六七八九十百千万零〇两\d]+)条((?:[、,，]\s*第?[一二三四五六七八九十百千万零〇两\d]+条)*)")
     for law_name, article_no, following_articles in pattern.findall(text or ""):
+        # 先保存主条号，再解析同一句中的后续条号
         article_numbers = [article_no]
         article_numbers.extend(re.findall(r"第?([一二三四五六七八九十百千万零〇两\d]+)条", following_articles))
         for number in article_numbers:
@@ -155,6 +283,10 @@ def _extract_law_reference_pairs(text: str) -> list[tuple[str, str]]:
     return references
 
 def _arabic_to_chinese_article_number(article_no: str) -> str:
+    """
+    将阿拉伯数字条号转换为中文条号，便于精确匹配本地法规原文中的中文编号。
+    """
+    # 本地法条多为中文条号；如果输入本身不是纯数字，则直接返回
     if not article_no.isdigit():
         return article_no
     digits = "零一二三四五六七八九"
@@ -178,24 +310,38 @@ def _arabic_to_chinese_article_number(article_no: str) -> str:
     return result + digits[tens] + "十" + (digits[ones] if ones else "")
 
 def _lookup_local_laws_for_consultation(first_answer: str, question: str, db_dir: str) -> str:
+    """
+    法律咨询助手的本地法条召回入口。
+
+    先按首轮回答中的明确法名和条号做精确查找；精确查找失败时再回退到 FAISS 语义检索。
+    """
     blocks = []
+    # 最多处理前 5 个候选引用，控制一次咨询中的本地检索成本
     for law_name, article_no in _extract_law_reference_pairs(first_answer)[:5]:
+        # 同时尝试原条号和阿拉伯数字转中文后的条号，提升本地精确命中率
         article_candidates = list(dict.fromkeys([article_no, _arabic_to_chinese_article_number(article_no)]))
         exact_hit = None
         for candidate in article_candidates:
             source, article_text = _lookup_law_article_text(law_name, candidate)
             if article_text:
+                # 精确命中时直接返回本地法条全文
                 exact_hit = f"【精确法条】《{law_name}》第{candidate}条\n【来源】{source}\n{article_text}"
                 break
         if exact_hit:
             blocks.append(exact_hit)
         else:
+            # 精确查找失败时，用“法名+条号”作为 query 进行语义召回
             blocks.append(f"【语义检索】《{law_name}》第{article_no}条\n{query_laws(f'《{law_name}》第{article_no}条', db_dir, top_k=3)}")
     if blocks:
         return "\n\n".join(blocks)
+    # 首轮回答没有抽取到明确法条时，直接用用户问题做语义检索
     return f"【语义检索】用户问题\n{query_laws(question, db_dir, top_k=5)}"
 
 def _ask_legal_consultant_first_round(question: str) -> str:
+    """
+    法律咨询第一轮：让模型先给出简短判断并显式列出可能相关的法条编号。
+    """
+    # 第一轮不直接给最终意见，只让模型识别问题和可能相关条文
     client = _get_llm_client()
     prompt = f"""
 你是劳动合同合规系统中的法律咨询预检智能体。请围绕用户问题给出简短初步判断，并列出你认为可能相关的中国劳动法律条文。
@@ -217,9 +363,14 @@ def _ask_legal_consultant_first_round(question: str) -> str:
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2
     )
+    # 返回首轮预检文本，第二轮会据此抽取法名和条号
     return response.choices[0].message.content.strip()
 
 def _stream_legal_consultant_final_answer(question: str, first_answer: str, local_laws: str):
+    """
+    法律咨询第二轮：基于本地召回法条流式生成最终答复。
+    """
+    # 第二轮必须基于本地召回内容作答，降低模型凭空编造法条的概率
     client = _get_llm_client()
     prompt = f"""
 你是劳动合同合规系统中的法律咨询助手。请只根据用户问题和本地法条库召回内容，给出正式答复。
@@ -246,15 +397,18 @@ def _stream_legal_consultant_final_answer(question: str, first_answer: str, loca
         temperature=0.15,
         stream=True
     )
+    # 将模型流式增量逐段 yield 给 st.write_stream，实现聊天式输出体验
     for chunk in stream:
         delta = chunk.choices[0].delta.content
         if delta:
             yield delta
 
 # 预加载环境变量并初始化数据库
+# load_dotenv 负责读取 .env；init_db 负责保证本地 audit_logs 表可用
 load_dotenv()
 init_db()
 
+# 应用名和副标题允许通过环境变量定制，未配置时使用默认中文演示标题
 APP_NAME = os.getenv("APP_NAME", "基于多智能体的个人劳动合同风险预警系统")
 APP_SUBTITLE = os.getenv("APP_SUBTITLE", "极简、安全、专业的双智能体协同劳动合同风险预警系统")
 
@@ -404,7 +558,7 @@ st.markdown("""
         font-weight: 600;
     }
     .contract-preview {
-        height: 380px;
+        height: 560px;
         overflow-y: auto;
         white-space: pre-wrap;
         color: #1d1d1f;
@@ -499,6 +653,10 @@ st.markdown("""
 
 # Helper 函数：绘制苹果扁平卡片（带色边框强调）
 def render_kpi_card(title: str, value: str, subtitle: str, border_color: str = "#d2d2d7"):
+    """
+    渲染运营看板顶部 KPI 卡片。
+    """
+    # 使用内联 HTML/CSS 绘制卡片，保证 Streamlit 多列布局下视觉一致
     st.markdown(f"""
     <div style="background-color: #ffffff; padding: 20px; border-radius: 12px; border: 1px solid {border_color}; color: #1d1d1f; box-shadow: 0 4px 16px rgba(0,0,0,0.02);">
         <div style="font-size: 11px; color: #86868b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">{title}</div>
@@ -538,36 +696,70 @@ with tab_audit:
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # 初始化审计结果会话状态以支持一键导出下载（避免 Streamlit 刷新导致下载失败）
+    # 初始化审计结果和解析结果缓存，避免 Streamlit 每次按钮点击/rerun 都重新执行耗时的 MinerU 解析。
     if "audit_result" not in st.session_state:
         st.session_state["audit_result"] = None
     if "current_file" not in st.session_state:
         st.session_state["current_file"] = None
+    if "parsed_contract" not in st.session_state:
+        st.session_state["parsed_contract"] = None
 
     if uploaded_file is not None:
-        if st.session_state["current_file"] != uploaded_file.name:
+        # 读取上传文件字节，用于保存临时文件和计算轻量文件指纹
+        uploaded_file_bytes = uploaded_file.getvalue()
+        # 以“文件名 + 文件大小”作为轻量文件指纹；文件变化时清空旧报告和旧解析结果。
+        uploaded_file_key = f"{uploaded_file.name}:{len(uploaded_file_bytes)}"
+        if st.session_state["current_file"] != uploaded_file_key:
+            # 用户上传新文件时，旧审查报告和旧解析缓存必须全部失效
             st.session_state["audit_result"] = None
-            st.session_state["current_file"] = uploaded_file.name
-            
-        # 建立缓冲区存放临时处理文件
-        temp_dir = os.path.join(os.path.dirname(__file__), "data", "temp")
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_path = os.path.join(temp_dir, uploaded_file.name)
-        
-        with open(temp_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-            
-        with st.spinner("正在提取并整理合同内容..."):
-            try:
-                # 段落提取与清洗
-                raw_text = extract_contract_text(temp_path)
-                # 元数据智能抓取
-                metadata = extract_metadata(raw_text)
-                # 本地隐私脱敏（身份证、手机号）
-                clean_text = desensitize_text(raw_text)
-            except Exception as e:
-                st.error(f"提取合同失败: {e}")
-                clean_text = None
+            st.session_state["current_file"] = uploaded_file_key
+            st.session_state["parsed_contract"] = None
+
+        if st.session_state["parsed_contract"] is None:
+            # MinerU CLI 只接受真实文件路径，因此先将上传内容落到 data/temp，再在 finally 中清理。
+            temp_dir = os.path.join(os.path.dirname(__file__), "data", "temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_path = os.path.join(temp_dir, uploaded_file.name)
+
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_file_bytes)
+
+            parser_message = ""
+            with st.spinner("正在使用本地增强解析能力提取并整理合同内容..."):
+                try:
+                    # 合同上传入口优先启用 MinerU；法律库解析仍由 retriever/agent 走 legacy，避免重型解析影响法规检索。
+                    raw_text = extract_contract_text(temp_path, prefer_mineru=True)
+                    parser_message = get_last_parser_message()
+                    # 提取甲方、乙方、期限、薪资等轻量元数据用于前端展示和入库
+                    metadata = extract_metadata(raw_text)
+                    # 合同正文在发给大模型前先做本地脱敏
+                    clean_text = desensitize_text(raw_text)
+                    # 将解析结果缓存到 session_state，避免按钮点击触发重复解析
+                    st.session_state["parsed_contract"] = {
+                        "clean_text": clean_text,
+                        "metadata": metadata,
+                        "parser_message": parser_message
+                    }
+                except Exception as e:
+                    st.error(f"提取合同失败: {e}")
+                    clean_text = None
+                finally:
+                    # 临时上传文件使用后立即清理，避免 data/temp 累积用户合同
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+        else:
+            # 复用已解析结果，确保点击“开始会审”时不会再次触发本地文档解析。
+            parsed_contract = st.session_state["parsed_contract"]
+            clean_text = parsed_contract["clean_text"]
+            metadata = parsed_contract["metadata"]
+            parser_message = parsed_contract["parser_message"]
+
+        if parser_message:
+            # MinerU 回退属于可用但需提示的状态；成功增强解析则用普通信息提示
+            if "回退" in parser_message or "未检测到" in parser_message:
+                st.warning(parser_message)
+            else:
+                st.info(parser_message)
                 
         if clean_text:
             # 双栏流式布局 (50% 对称排列)
@@ -603,6 +795,7 @@ with tab_audit:
                     current_report = st.session_state["audit_result"]["report"] if st.session_state["audit_result"] is not None else ""
                     contract_preview_box = st.empty()
                     with contract_preview_box.container():
+                        # 报告生成前只展示脱敏合同；报告生成后同一容器会重新渲染并叠加风险高亮。
                         render_contract_preview(clean_text, current_report)
                 
             with right_col:
@@ -635,6 +828,7 @@ with tab_audit:
                     run_audit = st.button("🚀 开始双智能体协同合规会审", use_container_width=True)
                     
                     if run_audit:
+                        # 记录审查开始时间，用于最终写入平均耗时 KPI
                         audit_started_at = time.perf_counter()
                         status_box = st.empty()
                         
@@ -648,6 +842,7 @@ with tab_audit:
                             # 将完整的合同文本传入，底层机制已重构为段落切分、多路召回与合并去重
                             retrieved_laws = query_laws(clean_text, db_dir, top_k=10)
                         except Exception as ex:
+                            # 检索失败不直接中断智能体流程，但会在报告中明确展示降级信息
                             retrieved_laws = f"【RAG 检索失败】未能从本地 FAISS 法律知识库召回可靠依据。错误信息：{ex}"
                             
                         # 2. 构造 LangGraph 双智能体状态输入
@@ -668,6 +863,7 @@ with tab_audit:
                         app = build_agent_graph()
                         
                         try:
+                            # LangGraph 执行 Auditor -> Critic -> Router -> ReportGenerator 的状态流转
                             result = app.invoke(inputs)
                             
                             status_box.markdown(
@@ -677,6 +873,7 @@ with tab_audit:
                             
                             # 4. 解析风险统计并持久化入库
                             raw_audit_text = result.get("raw_audit", "")
+                            # 入库统计以 raw_audit 为准，避免最终报告附加的补充法条章节干扰风险项计数。
                             risk_high_cnt = count_risk_items(raw_audit_text, "高风险")
                             risk_med_cnt = count_risk_items(raw_audit_text, "中风险")
                             duration_seconds = time.perf_counter() - audit_started_at
@@ -695,6 +892,7 @@ with tab_audit:
                                 "report": result["final_report"],
                                 "filename": uploaded_file.name
                             }
+                            # 报告生成后刷新左侧合同预览，使风险原文高亮立即生效
                             contract_preview_box.empty()
                             with contract_preview_box.container():
                                 render_contract_preview(clean_text, result["final_report"])
@@ -706,6 +904,7 @@ with tab_audit:
                             
                     # 判断会话状态中是否有已生成的审计报告，若有则持续渲染（避免由于 Streamlit 重新运行导致的下载中断）
                     if st.session_state["audit_result"] is not None:
+                        # Streamlit 每次交互都会 rerun，因此报告必须从 session_state 持续渲染
                         report_data = st.session_state["audit_result"]
                         st.markdown("<div style='color:#34c759; font-size:13px; font-weight:600; margin: 10px 0;'>🎉 审查完成！以下为联合生成的《合规智能会审报告》：</div>", unsafe_allow_html=True)
                         st.markdown("### 📄 智能合规审查报告")
@@ -741,13 +940,11 @@ with tab_audit:
                             </div>
                             """, unsafe_allow_html=True)
                 
-        # 物理清理本地缓存
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
     else:
         # 重置审计会话状态
         st.session_state["audit_result"] = None
         st.session_state["current_file"] = None
+        st.session_state["parsed_contract"] = None
         
         # 清爽优雅的空置首屏引导区 (Onboard State)
         st.markdown("""
@@ -776,6 +973,7 @@ with tab_consult:
 
     consult_question = st.chat_input("请输入你的劳动法律问题，例如：试用期六个月合法吗？")
 
+    # 法律咨询采用“单问单答”模式，只保留当前问题、当前答案和本次法条召回过程
     if "consult_current_question" not in st.session_state:
         st.session_state["consult_current_question"] = ""
     if "consult_current_answer" not in st.session_state:
@@ -786,12 +984,14 @@ with tab_consult:
         st.session_state["consult_current_local_laws"] = ""
 
     if consult_question:
+        # 提交新问题时清空上一轮答案，避免新旧问题内容混杂
         st.session_state["consult_current_question"] = consult_question
         st.session_state["consult_current_answer"] = ""
         st.session_state["consult_current_first_answer"] = ""
         st.session_state["consult_current_local_laws"] = ""
 
     if not consult_question and st.session_state["consult_current_question"] and st.session_state["consult_current_answer"]:
+        # 没有新输入时，复显上一轮咨询结果，避免 Streamlit rerun 后聊天记录消失
         with st.chat_message("user"):
             st.markdown(st.session_state["consult_current_question"])
         with st.chat_message("assistant"):
@@ -803,17 +1003,20 @@ with tab_consult:
                 st.markdown(f"```text\n{st.session_state['consult_current_local_laws']}\n```")
 
     if consult_question:
+        # 先展示用户问题，再进入两轮咨询流程
         with st.chat_message("user"):
             st.markdown(consult_question)
 
         try:
             with st.status("正在进行两轮法律咨询推理...", expanded=True) as status:
                 st.write("1/3 正在由预检智能体识别问题和可能相关法条...")
+                # 第一轮让模型提出候选法条，便于后续本地精确查找
                 first_answer = _ask_legal_consultant_first_round(consult_question)
                 st.session_state["consult_current_first_answer"] = first_answer
 
                 st.write("2/3 正在按法名和条号精确查找本地法条，必要时回退到 FAISS 语义检索...")
                 db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
+                # 第二步回到本地法条库检索，避免最终答复只依赖模型记忆
                 local_laws = _lookup_local_laws_for_consultation(first_answer, consult_question, db_dir)
                 st.session_state["consult_current_local_laws"] = local_laws
 
@@ -821,6 +1024,7 @@ with tab_consult:
                 status.update(label="本地法条已召回，开始流式生成正式答复", state="complete", expanded=False)
 
             with st.chat_message("assistant"):
+                # 第三步基于本地法条流式生成最终答案
                 final_answer = st.write_stream(
                     _stream_legal_consultant_final_answer(
                         consult_question,
@@ -829,11 +1033,13 @@ with tab_consult:
                     )
                 )
                 with st.expander("查看本次咨询的预检结果与本地法条召回", expanded=False):
+                    # 展开区用于教学演示：展示模型预检与本地 RAG 召回如何配合
                     st.markdown("#### 第一轮预检回答")
                     st.markdown(first_answer)
                     st.markdown("#### 本地法条库召回")
                     st.markdown(f"```text\n{local_laws}\n```")
 
+            # 保存最终答案，供下一次 Streamlit rerun 后继续展示
             st.session_state["consult_current_answer"] = final_answer
         except Exception as ex:
             st.error(f"法律咨询助手调用失败，请检查大模型 API Key、本地 FAISS 索引或网络配置。错误: {ex}")
@@ -899,6 +1105,7 @@ with tab_dashboard:
                 fig, ax = plt.subplots(figsize=(7, 3.2), facecolor='#ffffff')
                 ax.set_facecolor('#ffffff')
                 
+                # 使用等距横坐标绘制每份合同的高/中风险柱状对比
                 x = np.arange(len(filenames))
                 width = 0.35
                 
@@ -911,6 +1118,7 @@ with tab_dashboard:
                 ax.set_xticks(x)
                 ax.set_xticklabels(filenames, rotation=12, color='#86868b', fontsize=7)
                 
+                # 统一图例、刻度和轴线颜色，使 Matplotlib 图表融入亮色 UI
                 ax.legend(facecolor='#f5f5f7', edgecolor='#d2d2d7', labelcolor='#1d1d1f', fontsize=7)
                 ax.tick_params(colors='#86868b', labelsize=8)
                 
@@ -920,6 +1128,7 @@ with tab_dashboard:
                 ax.spines['left'].set_color('#d2d2d7')
                 ax.spines['bottom'].set_color('#d2d2d7')
                 
+                # 将 Matplotlib 图表嵌入 Streamlit 页面
                 st.pyplot(fig)
             else:
                 st.info("数据为空，待上传审核合同生成数据图表。")
@@ -930,6 +1139,7 @@ with tab_dashboard:
             
             activities = get_recent_activities(limit=5)
             if activities:
+                # 用 HTML 表格展示最近审查流水，风险数用徽章强化可读性
                 html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>甲方单位</th><th>乙方姓名</th><th>风险分布</th><th>耗时</th><th>审查时间</th></tr></thead><tbody>"
                 for act in activities:
                     html_code += f"<tr><td>{act['filename']}</td><td>{act['party_a']}</td><td>{act['party_b']}</td><td><span class='badge-high'>高 {act['risk_high']}</span> <span class='badge-med'>中 {act['risk_med']}</span></td><td style='color:#86868b;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td style='color:#86868b;'>{act['created_at']}</td></tr>"
@@ -947,6 +1157,7 @@ with tab_library:
     # 扫描 laws 目录
     laws_dir = os.path.join(os.path.dirname(__file__), "data", "laws")
     if os.path.exists(laws_dir):
+        # 只展示当前系统支持解析并可进入 RAG 的法规文件类型
         law_files = [f for f in os.listdir(laws_dir) if f.endswith((".docx", ".pdf", ".txt"))]
         if law_files:
             with st.container(border=True):
@@ -976,6 +1187,7 @@ with tab_library:
         db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
         with st.spinner("正在语义计算并召回相关法条..."):
             try:
+                # 法条文库页用于人工验证 RAG 命中效果，因此固定展示 Top 5 结果
                 results = query_laws(law_query, db_dir, top_k=5)
                 st.markdown("##### ⚖️ RAG 检索命中的最相关背景法条（Top 5）")
                 # 放在带有苹果细线边框的区域

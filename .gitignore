@@ -12,3 +12,4 @@ db/
 .DS_Store
 data/*.db
 data/temp/
+data/mineru_output/
