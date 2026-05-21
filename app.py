@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import base64
 import html
+import unicodedata
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -42,7 +43,7 @@ def _clean_highlight_candidate(text: str) -> str:
     # 去掉“合同原文：”“违规条款：”等标签，只保留实际候选片段
     text = re.sub(r"^(合同原文|违规条款|问题条款|原文摘录|风险条款|涉及条款|条款内容)\s*[:：]\s*", "", text)
     # 去掉外围引号、冒号、逗号和句末标点，提升与合同正文的精确匹配率
-    return text.strip(" \t\r\n“”\"'：:，,。；;")
+    return text.strip(" \t\r\n\u201c\u201d\"\u2018\u2019\uff1a:\uff0c,\u3002\uff1b;\u3001")
 
 def _strip_clause_prefix(text: str) -> str:
     """
@@ -50,7 +51,18 @@ def _strip_clause_prefix(text: str) -> str:
     """
     # 模型摘录经常把“第十二条：”带在片段前，而正文匹配时可能只需要条款内容
     text = re.sub(r"^第[一二三四五六七八九十百千万零〇\d]+条\s*[：:、，,。\s“”\"']*", "", text)
-    return text.strip(" \t\r\n“”\"'：:，,。；;")
+    return text.strip(" \t\r\n\u201c\u201d\"\u2018\u2019\uff1a:\uff0c,\u3002\uff1b;\u3001")
+
+def _is_multi_sentence_fragment(text: str) -> bool:
+    """
+    判断候选片段是否包含多个句子，多个句子的整段候选只作为兜底匹配，不优先占用高亮区间。
+    """
+    parts = [
+        _clean_highlight_candidate(part)
+        for part in re.split(r"[。！？!?；;\n]", text)
+        if _clean_highlight_candidate(part)
+    ]
+    return len(parts) > 1
 
 def _expand_highlight_fragments(candidate: str) -> list[str]:
     """
@@ -66,20 +78,22 @@ def _expand_highlight_fragments(candidate: str) -> list[str]:
         # 对每个变体先做标准清洗
         variant = _clean_highlight_candidate(variant)
         variant = _strip_clause_prefix(variant)
-        # 对“……/...”省略号进行拆分，避免模型省略中间文字后整段无法匹配
-        ellipsis_parts = [
-            _strip_clause_prefix(_clean_highlight_candidate(part))
-            for part in re.split(r"(?:…{2,}|\.{3,})", variant)
-            if _strip_clause_prefix(_clean_highlight_candidate(part))
-        ]
+        # 只有真正存在“……/...”时才拆分省略号，避免无省略号的多句整段重新混入候选
+        ellipsis_parts = []
+        if re.search(r"(?:…{2,}|\.{3,})", variant):
+            ellipsis_parts = [
+                _strip_clause_prefix(_clean_highlight_candidate(part))
+                for part in re.split(r"(?:…{2,}|\.{3,})", variant)
+                if _strip_clause_prefix(_clean_highlight_candidate(part))
+            ]
         # 后续会对完整片段和省略号拆分片段继续按句子、逗号扩展
         variants_to_split = [variant] + ellipsis_parts
-        if variant:
+        if variant and not _is_multi_sentence_fragment(variant):
             fragments.append(variant)
         fragments.extend(ellipsis_parts)
         for split_source in variants_to_split:
             # 按句号、分号、换行切句，得到更短、更容易精确定位的风险片段
-            for sentence in re.split(r"[。；;\n]", split_source):
+            for sentence in re.split(r"[。！？!?；;\n]", split_source):
                 sentence = _strip_clause_prefix(_clean_highlight_candidate(sentence))
                 if sentence:
                     fragments.append(sentence)
@@ -93,6 +107,9 @@ def _expand_highlight_fragments(candidate: str) -> list[str]:
                     # 相邻逗号片段重新组合，兼顾片段太短和整句太长两种问题
                     for index in range(len(comma_parts) - 1):
                         fragments.append(f"{comma_parts[index]}，{comma_parts[index + 1]}")
+                    # 3 片段滑窗组合，覆盖较长后半句命中
+                    for index in range(len(comma_parts) - 2):
+                        fragments.append(f"{comma_parts[index]}，{comma_parts[index + 1]}，{comma_parts[index + 2]}")
     return fragments
 
 def _extract_risk_highlight_candidates(report_text: str) -> list[tuple[str, str]]:
@@ -118,29 +135,33 @@ def _extract_risk_highlight_candidates(report_text: str) -> list[tuple[str, str]
             label_match = label_pattern.search(line)
             if label_match:
                 inline_text = label_match.group(2)
-                if inline_text.strip():
-                    # 标签和值在同一行时，直接取冒号后的内容
-                    block_candidates.append(inline_text)
-                else:
-                    # 标签独占一行时，向后读取连续正文行，直到遇到下一个字段或空段落
-                    following = []
-                    for next_line in block_lines[line_index + 1:]:
-                        stripped_next_line = next_line.strip()
-                        if not stripped_next_line:
-                            if following:
-                                break
-                            continue
-                        if label_pattern.search(stripped_next_line):
+                following = []
+                for next_line in block_lines[line_index + 1:]:
+                    stripped_next_line = next_line.strip()
+                    if not stripped_next_line:
+                        if following or inline_text.strip():
                             break
-                        if re.match(r"^(?:[-*]\s*)?(风险分析|法律依据|建议修改后条款|修改后条款|整改建议|优化建议)\s*[:：]", stripped_next_line):
-                            break
-                        following.append(stripped_next_line)
-                    if following:
-                        block_candidates.append(" ".join(following))
+                        continue
+                    if label_pattern.search(stripped_next_line):
+                        break
+                    if re.match(r"^(?:[-*]\s*)?(?:\*\*)?(风险分析|违规分析|问题分析|法律依据|建议修改后条款|修改后条款|整改建议|优化建议)(?:\*\*)?\s*[:：]", stripped_next_line):
+                        break
+                    following.append(stripped_next_line)
+                combined_candidate = " ".join(part for part in [inline_text.strip(), *following] if part)
+                if combined_candidate:
+                    block_candidates.append(combined_candidate)
         if not block_candidates:
             # 如果模型没按字段输出，则退化提取引号中的短片段
-            for quoted in re.findall(r"[“\"]([^”\"]{8,220})[”\"]", block):
+            for quoted in re.findall(r"[“”\"\'\u201c\u201d\u2018\u2019]{1}([^“”\"\'\u201c\u201d\u2018\u2019]{4,220})[“”\"\'\u201c\u201d\u2018\u2019]{1}", block):
                 block_candidates.append(quoted)
+        # 拆分同一行中用顿号/逗号串联的多段引号，如 "A"、"B"、"C" -> 分别提取 A, B, C
+        expanded_candidates = []
+        for cand in block_candidates:
+            sub_quotes = re.findall(r"[\u201c\u201d\"\u2018\u2019]{1}([^\u201c\u201d\"\u2018\u2019]{4,220})[\u201c\u201d\"\u2018\u2019]{1}", cand)
+            if len(sub_quotes) > 1:
+                expanded_candidates.extend(sub_quotes)
+            expanded_candidates.append(cand)
+        block_candidates = expanded_candidates
         for candidate in block_candidates:
             # 排除明显不是合同原文的法律名称或修改建议
             candidate = _clean_highlight_candidate(candidate)
@@ -165,15 +186,27 @@ def _find_snippet_positions(contract_text: str, snippet: str) -> list[tuple[int,
         start = contract_text.find(snippet, start + len(snippet))
     if positions:
         return positions
-    # 第二轮构造“去空白合同文本”，解决 PDF/Word 解析换行打断句子的情况
+    # 第二轮构造"归一化紧凑文本"，解决 MinerU 解析产生的零宽字符、全角空格和换行打断问题
+    def _is_invisible(c: str) -> bool:
+        """判断字符是否为空白或 Unicode 格式/零宽字符，这类字符在紧凑匹配时应跳过"""
+        if c.isspace():
+            return True
+        cat = unicodedata.category(c)
+        return cat in ('Cf', 'Cc')
+    # 逐字符 NFKC 归一化：全角数字/字母 → 半角；保持 compact_to_original 始终指向原文下标
     compact_chars = []
     compact_to_original = []
     for index, char in enumerate(contract_text):
-        if not char.isspace():
-            compact_chars.append(char)
+        if _is_invisible(char):
+            continue
+        for nc in unicodedata.normalize('NFKC', char):
+            compact_chars.append(nc)
             compact_to_original.append(index)
     compact_contract = "".join(compact_chars)
-    compact_snippet = re.sub(r"\s+", "", snippet)
+    compact_snippet = "".join(
+        nc for c in snippet if not _is_invisible(c)
+        for nc in unicodedata.normalize('NFKC', c)
+    )
     # 过短片段在紧凑匹配中误命中概率较高，因此直接放弃
     if len(compact_snippet) < 8:
         return positions
