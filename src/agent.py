@@ -272,6 +272,24 @@ def _format_supplemental_refs_section(raw_audit: str, retrieved_laws: str) -> st
             lines.append("- **来源**: 未在本地法条库中精确匹配到该条原文，请人工补充或将对应法规文件加入 `data/laws/` 后重新生成报告。")
     return "\n".join(lines)
 
+def _format_supplemental_refs_context(raw_audit: str, retrieved_laws: str) -> str:
+    """
+    为 Critic 复核上下文补充 Auditor 已引用但初始 RAG 未命中的本地法条全文。
+    """
+    supplemental_refs = _find_supplemental_law_refs(raw_audit, retrieved_laws)
+    if not supplemental_refs:
+        return ""
+    lines = [
+        "以下法条由系统根据 Auditor 草稿中的引用，从本地法条库按法名和条号精确补充；它们未必属于初始 RAG 命中结果，但可用于复核法条真实性和法律效果。"
+    ]
+    for idx, (law_name, article) in enumerate(supplemental_refs, 1):
+        source, article_text = _lookup_law_article_text(law_name, article)
+        if article_text:
+            lines.append(f"【补充依据 {idx}】(来源: {source})\n《{law_name}》第{article}条\n{article_text}")
+        else:
+            lines.append(f"【补充依据 {idx}】《{law_name}》第{article}条\n未在本地法条库中精确匹配到原文，请视为待人工核验引用。")
+    return "\n\n".join(lines)
+
 def _extract_declared_risk_counts(raw_audit: str) -> dict[str, int]:
     """
     从报告前言中提取模型声明的高/中/低风险数量，用于和实际风险块数量做一致性校验。
@@ -473,6 +491,11 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
     """
     # Critic 使用同一套大模型客户端，但提示词定位为复核与质量把关
     client = _get_llm_client()
+    # 在 Critic 复核前，先把 Auditor 草稿中引用但初始 RAG 未命中的本地法条补入上下文
+    law_context = state["retrieved_laws"]
+    supplemental_laws_context = _format_supplemental_refs_context(state["raw_audit"], state["retrieved_laws"])
+    if supplemental_laws_context:
+        law_context = f"{law_context}\n\n【Auditor 引用的本地补充法条】\n{supplemental_laws_context}"
     
     prompt = f"""
 你是一个资深的中国劳动合同法务总监与反思审计智能体（Critic）。请对下属 Auditor 提交的劳动合同审查草稿进行双重反思审计。
@@ -486,7 +509,7 @@ def critic_node(state: AgentState) -> Dict[str, Any]:
 {state['raw_audit']}
 
 【参考的法律依据】:
-{state['retrieved_laws']}
+{law_context}
 
 【劳动合同专项复核评分表】:
 1. 事实覆盖完整性：是否覆盖劳动合同期限、试用期、工作内容与地点、工时休假、劳动报酬、社会保险、劳动保护、解除终止、违约责任、女职工保护、工伤责任等核心模块；是否遗漏当前场景的高频争议点。

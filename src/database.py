@@ -57,16 +57,7 @@ def init_db() -> None:
         # 旧版本 audit_logs 没有耗时字段时，自动追加列，避免用户手动删库
         cursor.execute("ALTER TABLE audit_logs ADD COLUMN duration_seconds REAL DEFAULT 0")
 
-    # 清理早期演示种子数据，避免与用户真实审查记录混在一起影响看板
-    seed_filenames = [
-        "劳动合同模板(普通岗).docx",
-        "研发专家聘用协议.pdf",
-        "行政前台固定合同.docx",
-        "销售经理任职劳动合同.pdf",
-        "高级算法工程师保密协议.docx"
-    ]
-    cursor.executemany("DELETE FROM audit_logs WHERE filename = ?", [(name,) for name in seed_filenames])
-    # 提交迁移和清理操作
+    # 提交迁移操作
     conn.commit()
         
     # 初始化完成后及时关闭连接，释放文件句柄
