@@ -97,6 +97,32 @@ def _normalize_law_name(name: str) -> str:
     # 未命中已知法规时，删除常见国家名前缀、年份后缀、扩展名和空白
     return re.sub(r"中华人民共和国|_\d+|\.docx|\.pdf|\.txt|\s", "", name)
 
+def _arabic_to_chinese_article_number(article_no: str) -> str:
+    if not article_no.isdigit():
+        return article_no
+    digits = "零一二三四五六七八九"
+    number = int(article_no)
+    if number == 0:
+        return "零"
+    if number < 10:
+        return digits[number]
+    if number < 20:
+        return "十" + (digits[number % 10] if number % 10 else "")
+    if number < 100:
+        tens, ones = divmod(number, 10)
+        return digits[tens] + "十" + (digits[ones] if ones else "")
+    hundreds, rest = divmod(number, 100)
+    result = digits[hundreds] + "百"
+    if rest == 0:
+        return result
+    if rest < 10:
+        return result + "零" + digits[rest]
+    tens, ones = divmod(rest, 10)
+    return result + digits[tens] + "十" + (digits[ones] if ones else "")
+
+def _article_number_candidates(article: str) -> list[str]:
+    return list(dict.fromkeys([article, _arabic_to_chinese_article_number(article)]))
+
 def _extract_law_refs(text: str) -> list[tuple[str, str]]:
     """
     从报告文本中抽取《法律名称》第X条形式的法律引用。
@@ -127,10 +153,11 @@ def _retrieved_laws_contain_ref(retrieved_laws: str, law_name: str, article: str
     # 将待查法名归一化，和 RAG 来源文本中的法名保持同一比较口径
     normalized_law = _normalize_law_name(law_name)
     # 先定位条号，再检查条号附近是否出现对应法名
-    for match in re.finditer(rf"第{article}条", retrieved_laws):
-        context = retrieved_laws[max(0, match.start() - 160):match.end() + 160]
-        if normalized_law in context:
-            return True
+    for candidate_article in _article_number_candidates(article):
+        for match in re.finditer(rf"第{candidate_article}条", retrieved_laws):
+            context = retrieved_laws[max(0, match.start() - 160):match.end() + 160]
+            if normalized_law in context:
+                return True
     return False
 
 def _split_risk_blocks(raw_audit: str) -> list[tuple[str, str, str]]:
@@ -205,9 +232,12 @@ def _extract_article_text_from_law_text(law_text: str, article: str) -> str:
     从完整法规文本中按条号截取单条法条全文。
     """
     # 从目标条号截取到下一条、下一章或文件结尾，保证补充依据是完整条文
-    pattern = rf"(?m)^第{re.escape(article)}条[　 \t]?[\s\S]*?(?=^第{ARTICLE_NUM_PATTERN}条[　 \t]?|^第{ARTICLE_NUM_PATTERN}章[　 \t]?|\Z)"
-    match = re.search(pattern, law_text)
-    return match.group(0).strip() if match else ""
+    for candidate_article in _article_number_candidates(article):
+        pattern = rf"(?m)^第{re.escape(candidate_article)}条[　 \t]?[\s\S]*?(?=^第{ARTICLE_NUM_PATTERN}条[　 \t]?|^第{ARTICLE_NUM_PATTERN}章[　 \t]?|^《[^》]+》|\Z)"
+        match = re.search(pattern, law_text)
+        if match:
+            return match.group(0).strip()
+    return ""
 
 def _lookup_law_article_text(law_name: str, article: str) -> tuple[str, str]:
     """
