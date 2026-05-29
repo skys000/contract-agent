@@ -1227,6 +1227,12 @@ with tab_dashboard:
         
         activities = get_recent_activities(limit=20)
         if activities:
+            # 计算平均耗时，用于标记异常数据
+            durations = [act['duration_seconds'] or 0 for act in activities]
+            avg_duration = sum(durations) / len(durations) if durations else 0
+            # 耗时超过平均值2倍或超过60秒标记为异常
+            abnormal_threshold = max(avg_duration * 2, 60)
+            
             # 按耗时排序，取最快和最慢的各5条
             sorted_activities = sorted(activities, key=lambda x: x['duration_seconds'] or 0)
             fastest = sorted_activities[:5]
@@ -1240,6 +1246,8 @@ with tab_dashboard:
                 df_fast = pd.DataFrame(fastest)
                 df_fast = df_fast[['filename', 'duration_seconds', 'risk_high', 'risk_med']]
                 df_fast.columns = ['合同名称', '耗时(秒)', '高风险', '中风险']
+                # 标记异常数据
+                df_fast['状态'] = df_fast['耗时(秒)'].apply(lambda x: '⚠️ 异常' if x > abnormal_threshold else '✅ 正常')
                 st.dataframe(df_fast, use_container_width=True, hide_index=True)
             
             with col_slow:
@@ -1248,6 +1256,8 @@ with tab_dashboard:
                 df_slow = pd.DataFrame(slowest)
                 df_slow = df_slow[['filename', 'duration_seconds', 'risk_high', 'risk_med']]
                 df_slow.columns = ['合同名称', '耗时(秒)', '高风险', '中风险']
+                # 标记异常数据
+                df_slow['状态'] = df_slow['耗时(秒)'].apply(lambda x: '⚠️ 异常' if x > abnormal_threshold else '✅ 正常')
                 st.dataframe(df_slow, use_container_width=True, hide_index=True)
         else:
             st.info("暂无审查效率数据。")
