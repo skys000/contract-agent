@@ -1160,7 +1160,7 @@ with tab_dashboard:
                 ax.set_xticklabels(filenames, rotation=12, color='#86868b', fontsize=7)
                 
                 # 统一图例、刻度和轴线颜色，使 Matplotlib 图表融入亮色 UI
-                ax.legend(facecolor='#f5f5f7', edgecolor='#d2d2d7', labelcolor='#1d1d1f', fontsize=7)
+                ax.legend(facecolor='#f5f5f7', edgecolor='#d2d2d7', labelcolor='#1d1d1f', fontsize=7, loc='upper right', bbox_to_anchor=(1, 1))
                 ax.tick_params(colors='#86868b', labelsize=8)
                 
                 # 精简轴线
