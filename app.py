@@ -1075,12 +1075,17 @@ with tab_dashboard:
     
     # 时间范围筛选器
     st.markdown("### 📅 时间范围筛选", unsafe_allow_html=True)
-    time_range = st.selectbox(
-        "选择数据统计时间范围",
-        ["全部时间", "最近7天", "最近30天"],
-        label_visibility="collapsed",
-        horizontal=True
-    )
+    col_filter, col_refresh = st.columns([3, 1])
+    with col_filter:
+        time_range = st.selectbox(
+            "选择数据统计时间范围",
+            ["全部时间", "最近7天", "最近30天"],
+            label_visibility="collapsed",
+            horizontal=True
+        )
+    with col_refresh:
+        if st.button("🔄 刷新数据", use_container_width=True):
+            st.rerun()
     
     # 动态抓取库中最新统计
     kpis = get_kpi_metrics()
