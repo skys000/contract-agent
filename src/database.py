@@ -7,6 +7,7 @@
 
 import os
 import sqlite3
+import shutil
 from datetime import datetime
 from typing import List, Dict, Any, Tuple
 
@@ -226,3 +227,55 @@ def get_monthly_risk_stats() -> Tuple[List[str], List[int], List[int]]:
         med_counts.append(row["risk_count_med"])
         
     return filenames, high_counts, med_counts
+
+def backup_database() -> str:
+    """
+    备份数据库文件，返回备份文件路径
+    """
+    # 创建备份目录
+    backup_dir = os.path.join(os.path.dirname(DB_PATH), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    
+    # 生成带时间戳的备份文件名
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_file = os.path.join(backup_dir, f"audit_backup_{timestamp}.db")
+    
+    # 复制数据库文件
+    shutil.copy2(DB_PATH, backup_file)
+    
+    return backup_file
+
+def restore_database(backup_file: str) -> bool:
+    """
+    从备份文件恢复数据库，返回是否成功
+    """
+    try:
+        # 检查备份文件是否存在
+        if not os.path.exists(backup_file):
+            return False
+        
+        # 关闭所有数据库连接（需要在外部调用时确保）
+        # 替换当前数据库文件
+        shutil.copy2(backup_file, DB_PATH)
+        
+        return True
+    except Exception:
+        return False
+
+def list_backups() -> List[str]:
+    """
+    列出所有备份文件
+    """
+    backup_dir = os.path.join(os.path.dirname(DB_PATH), "backups")
+    if not os.path.exists(backup_dir):
+        return []
+    
+    backups = []
+    for file in os.listdir(backup_dir):
+        if file.startswith("audit_backup_") and file.endswith(".db"):
+            backups.append(os.path.join(backup_dir, file))
+    
+    # 按修改时间倒序排列
+    backups.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    
+    return backups

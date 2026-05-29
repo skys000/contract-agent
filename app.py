@@ -23,7 +23,7 @@ from openai import OpenAI
 # 将 src 目录临时加入模块查找路径~X
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from parser import extract_contract_text, desensitize_text, extract_metadata, get_last_parser_message
-from database import init_db, insert_audit_log, get_kpi_metrics, get_recent_activities, get_monthly_risk_stats
+from database import init_db, insert_audit_log, get_kpi_metrics, get_recent_activities, get_monthly_risk_stats, backup_database, restore_database, list_backups
 from agent import build_agent_graph, _lookup_law_article_text
 from retriever import query_laws
 
@@ -1251,6 +1251,39 @@ with tab_dashboard:
                 st.dataframe(df_slow, use_container_width=True, hide_index=True)
         else:
             st.info("暂无审查效率数据。")
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # 数据备份和恢复功能
+    with st.container(border=True):
+        st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>💾 数据备份与恢复</h4>", unsafe_allow_html=True)
+        
+        col_backup, col_restore = st.columns(2)
+        
+        with col_backup:
+            if st.button("📦 创建备份", use_container_width=True):
+                try:
+                    backup_file = backup_database()
+                    st.success(f"备份成功！备份文件：{backup_file}")
+                except Exception as e:
+                    st.error(f"备份失败：{e}")
+        
+        with col_restore:
+            backups = list_backups()
+            if backups:
+                backup_options = [os.path.basename(b) for b in backups]
+                selected_backup = st.selectbox("选择备份文件", backup_options, label_visibility="collapsed")
+                if st.button("🔄 恢复备份", use_container_width=True):
+                    try:
+                        backup_file = backups[backup_options.index(selected_backup)]
+                        if restore_database(backup_file):
+                            st.success("恢复成功！请刷新页面查看数据。")
+                        else:
+                            st.error("恢复失败！")
+                    except Exception as e:
+                        st.error(f"恢复失败：{e}")
+            else:
+                st.info("暂无备份文件。")
 
 # ------------------------------------------
 # TAB 4: 合规法律条款文库
