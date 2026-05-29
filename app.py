@@ -1188,6 +1188,39 @@ with tab_dashboard:
             st.markdown(html_code, unsafe_allow_html=True)
         else:
             st.info("暂无甲方单位统计数据。")
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # 第四行：审查效率排行榜
+    with st.container(border=True):
+        st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>⚡ 审查效率排行榜</h4>", unsafe_allow_html=True)
+        
+        activities = get_recent_activities(limit=20)
+        if activities:
+            # 按耗时排序，取最快和最慢的各5条
+            sorted_activities = sorted(activities, key=lambda x: x['duration_seconds'] or 0)
+            fastest = sorted_activities[:5]
+            slowest = sorted_activities[-5:][::-1]  # 最慢的5条，按耗时降序
+            
+            col_fast, col_slow = st.columns(2)
+            
+            with col_fast:
+                st.markdown("<h5 style='color:#34c759; margin-top:0;'>🚀 最快审查（Top 5）</h5>", unsafe_allow_html=True)
+                html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>耗时</th><th>风险数</th></tr></thead><tbody>"
+                for act in fastest:
+                    html_code += f"<tr><td>{act['filename']}</td><td style='color:#34c759;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td><span class='badge-high'>高{act['risk_high']}</span> <span class='badge-med'>中{act['risk_med']}</span></td></tr>"
+                html_code += "</tbody></table>"
+                st.markdown(html_code, unsafe_allow_html=True)
+            
+            with col_slow:
+                st.markdown("<h5 style='color:#ff3b30; margin-top:0;'>🐌 最慢审查（Top 5）</h5>", unsafe_allow_html=True)
+                html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>耗时</th><th>风险数</th></tr></thead><tbody>"
+                for act in slowest:
+                    html_code += f"<tr><td>{act['filename']}</td><td style='color:#ff3b30;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td><span class='badge-high'>高{act['risk_high']}</span> <span class='badge-med'>中{act['risk_med']}</span></td></tr>"
+                html_code += "</tbody></table>"
+                st.markdown(html_code, unsafe_allow_html=True)
+        else:
+            st.info("暂无审查效率数据。")
 
 # ------------------------------------------
 # TAB 4: 合规法律条款文库
