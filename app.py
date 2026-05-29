@@ -1169,6 +1169,25 @@ with tab_dashboard:
                 st.markdown(html_code, unsafe_allow_html=True)
             else:
                 st.info("尚无审查流水记录。")
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # 第三行：甲方单位统计表格
+    with st.container(border=True):
+        st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>🏢 甲方单位审查统计</h4>", unsafe_allow_html=True)
+        
+        party_stats = get_party_a_statistics(limit=10)
+        if party_stats:
+            html_code = "<table class='apple-table'><thead><tr><th>甲方单位</th><th>审查次数</th><th>高风险项</th><th>中风险项</th><th>风险率</th></tr></thead><tbody>"
+            for stat in party_stats:
+                risk_rate = 0.0
+                if stat['count'] > 0:
+                    risk_rate = round(((stat['high_risks'] + stat['med_risks']) / stat['count']) * 100, 1)
+                html_code += f"<tr><td>{stat['party_a']}</td><td>{stat['count']}</td><td><span class='badge-high'>{stat['high_risks']}</span></td><td><span class='badge-med'>{stat['med_risks']}</span></td><td style='color:#86868b;'>{risk_rate}%</td></tr>"
+            html_code += "</tbody></table>"
+            st.markdown(html_code, unsafe_allow_html=True)
+        else:
+            st.info("暂无甲方单位统计数据。")
 
 # ------------------------------------------
 # TAB 4: 合规法律条款文库
