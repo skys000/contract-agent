@@ -1171,6 +1171,20 @@ with tab_dashboard:
                 
                 # 将 Matplotlib 图表嵌入 Streamlit 页面
                 st.pyplot(fig)
+                
+                # 添加图表下载按钮
+                import io
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+                buf.seek(0)
+                st.download_button(
+                    label="📥 下载图表",
+                    data=buf,
+                    file_name="风险分布统计.png",
+                    mime="image/png",
+                    use_container_width=True
+                )
+                plt.close(fig)
             else:
                 st.info("数据为空，待上传审核合同生成数据图表。")
         
