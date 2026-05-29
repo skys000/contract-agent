@@ -674,13 +674,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Helper 函数：绘制苹果扁平卡片（带色边框强调）
-def render_kpi_card(title: str, value: str, subtitle: str, border_color: str = "#d2d2d7"):
+def render_kpi_card(title: str, value: str, subtitle: str, border_color: str = "#d2d2d7", gradient_start: str = "#ffffff", gradient_end: str = "#f5f5f7"):
     """
     渲染运营看板顶部 KPI 卡片。
     """
     # 使用内联 HTML/CSS 绘制卡片，保证 Streamlit 多列布局下视觉一致
     st.markdown(f"""
-    <div style="background-color: #ffffff; padding: 20px; border-radius: 12px; border: 1px solid {border_color}; color: #1d1d1f; box-shadow: 0 4px 16px rgba(0,0,0,0.02);">
+    <div style="background: linear-gradient(135deg, {gradient_start} 0%, {gradient_end} 100%); padding: 20px; border-radius: 12px; border: 1px solid {border_color}; color: #1d1d1f; box-shadow: 0 4px 16px rgba(0,0,0,0.02);">
         <div style="font-size: 11px; color: #86868b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">{title}</div>
         <div style="font-size: 26px; font-weight: 700; margin: 6px 0; color: #1d1d1f;">{value}</div>
         <div style="font-size: 11px; color: #86868b; font-weight: 400;">{subtitle}</div>
@@ -1091,28 +1091,32 @@ with tab_dashboard:
             "累计已审查合同", 
             f"{kpis['total_audits']} 份", 
             "SQLite 本地物理库统计数", 
-            "#d2d2d7" # 银灰
+            "#d2d2d7", # 银灰
+            "#ffffff", "#f5f5f7"
         )
     with col2:
         render_kpi_card(
             "高风险合同占比", 
             kpis['high_risk_ratio'], 
             "含有 1 项以上高风险项合同", 
-            "rgba(255, 59, 48, 0.4)" # 高亮淡红
+            "rgba(255, 59, 48, 0.4)", # 高亮淡红
+            "#fff5f5", "#ffe5e5"
         )
     with col3:
         render_kpi_card(
             "平均审查速度", 
             kpis['average_duration'], 
             "双智能体流转反思耗时均值", 
-            "rgba(0, 113, 227, 0.4)" # 高亮淡蓝
+            "rgba(0, 113, 227, 0.4)", # 高亮淡蓝
+            "#f0f7ff", "#e0efff"
         )
     with col4:
         render_kpi_card(
             "今日新增上传", 
             f"{kpis['today_uploads']} 份", 
             "按本地审查完成时间统计", 
-            "rgba(52, 199, 89, 0.4)" # 高亮淡绿
+            "rgba(52, 199, 89, 0.4)", # 高亮淡绿
+            "#f0fff5", "#e0ffe5"
         )
         
     st.markdown("<br>", unsafe_allow_html=True)
