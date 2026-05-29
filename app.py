@@ -19,7 +19,7 @@ import unicodedata
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# 将 src 目录临时加入模块查找路径
+# 将 src 目录临时加入模块查找路径~X
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from parser import extract_contract_text, desensitize_text, extract_metadata, get_last_parser_message
 from database import init_db, insert_audit_log, get_kpi_metrics, get_recent_activities, get_monthly_risk_stats
@@ -1177,7 +1177,7 @@ with tab_dashboard:
                 # 用 HTML 表格展示最近审查流水，风险数用徽章强化可读性
                 html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>甲方单位</th><th>乙方姓名</th><th>风险分布</th><th>耗时</th><th>审查时间</th></tr></thead><tbody>"
                 for act in activities:
-                    html_code += f"<tr><td>{act['filename']}</td><td>{act['party_a']}</td><td>{act['party_b']}</td><td><span class='badge-high'>高 {act['risk_high']}</span> <span class='badge-med'>中 {act['risk_med']}</span></td><td style='color:#86868b;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td style='color:#86868b;'>{act['created_at']}</td></tr>"
+                    html_code += f"<tr><td>{html.escape(act['filename'])}</td><td>{html.escape(act['party_a'])}</td><td>{html.escape(act['party_b'])}</td><td><span class='badge-high'>高 {act['risk_high']}</span> <span class='badge-med'>中 {act['risk_med']}</span></td><td style='color:#86868b;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td style='color:#86868b;'>{html.escape(act['created_at'])}</td></tr>"
                 html_code += "</tbody></table>"
                 st.markdown(html_code, unsafe_allow_html=True)
             else:
@@ -1196,7 +1196,7 @@ with tab_dashboard:
                 risk_rate = 0.0
                 if stat['count'] > 0:
                     risk_rate = round(((stat['high_risks'] + stat['med_risks']) / stat['count']) * 100, 1)
-                html_code += f"<tr><td>{stat['party_a']}</td><td>{stat['count']}</td><td><span class='badge-high'>{stat['high_risks']}</span></td><td><span class='badge-med'>{stat['med_risks']}</span></td><td style='color:#86868b;'>{risk_rate}%</td></tr>"
+                html_code += f"<tr><td>{html.escape(stat['party_a'])}</td><td>{stat['count']}</td><td><span class='badge-high'>{stat['high_risks']}</span></td><td><span class='badge-med'>{stat['med_risks']}</span></td><td style='color:#86868b;'>{risk_rate}%</td></tr>"
             html_code += "</tbody></table>"
             st.markdown(html_code, unsafe_allow_html=True)
         else:
@@ -1221,7 +1221,7 @@ with tab_dashboard:
                 st.markdown("<h5 style='color:#34c759; margin-top:0;'>🚀 最快审查（Top 5）</h5>", unsafe_allow_html=True)
                 html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>耗时</th><th>风险数</th></tr></thead><tbody>"
                 for act in fastest:
-                    html_code += f"<tr><td>{act['filename']}</td><td style='color:#34c759;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td><span class='badge-high'>高{act['risk_high']}</span> <span class='badge-med'>中{act['risk_med']}</span></td></tr>"
+                    html_code += f"<tr><td>{html.escape(act['filename'])}</td><td style='color:#34c759;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td><span class='badge-high'>高{act['risk_high']}</span> <span class='badge-med'>中{act['risk_med']}</span></td></tr>"
                 html_code += "</tbody></table>"
                 st.markdown(html_code, unsafe_allow_html=True)
             
@@ -1229,7 +1229,7 @@ with tab_dashboard:
                 st.markdown("<h5 style='color:#ff3b30; margin-top:0;'>🐌 最慢审查（Top 5）</h5>", unsafe_allow_html=True)
                 html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>耗时</th><th>风险数</th></tr></thead><tbody>"
                 for act in slowest:
-                    html_code += f"<tr><td>{act['filename']}</td><td style='color:#ff3b30;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td><span class='badge-high'>高{act['risk_high']}</span> <span class='badge-med'>中{act['risk_med']}</span></td></tr>"
+                    html_code += f"<tr><td>{html.escape(act['filename'])}</td><td style='color:#ff3b30;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td><span class='badge-high'>高{act['risk_high']}</span> <span class='badge-med'>中{act['risk_med']}</span></td></tr>"
                 html_code += "</tbody></table>"
                 st.markdown(html_code, unsafe_allow_html=True)
         else:
