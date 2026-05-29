@@ -13,6 +13,7 @@ import re
 import time
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import base64
 import html
 import unicodedata
@@ -1174,12 +1175,11 @@ with tab_dashboard:
             
             activities = get_recent_activities(limit=5)
             if activities:
-                # 用 HTML 表格展示最近审查流水，风险数用徽章强化可读性
-                html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>甲方单位</th><th>乙方姓名</th><th>风险分布</th><th>耗时</th><th>审查时间</th></tr></thead><tbody>"
-                for act in activities:
-                    html_code += f"<tr><td>{html.escape(act['filename'])}</td><td>{html.escape(act['party_a'])}</td><td>{html.escape(act['party_b'])}</td><td><span class='badge-high'>高 {act['risk_high']}</span> <span class='badge-med'>中 {act['risk_med']}</span></td><td style='color:#86868b;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td style='color:#86868b;'>{html.escape(act['created_at'])}</td></tr>"
-                html_code += "</tbody></table>"
-                st.markdown(html_code, unsafe_allow_html=True)
+                # 使用 st.dataframe 替代 HTML 表格，支持排序功能
+                df = pd.DataFrame(activities)
+                df = df[['filename', 'party_a', 'party_b', 'risk_high', 'risk_med', 'duration_seconds', 'created_at']]
+                df.columns = ['合同名称', '甲方单位', '乙方姓名', '高风险', '中风险', '耗时(秒)', '审查时间']
+                st.dataframe(df, use_container_width=True, hide_index=True)
             else:
                 st.info("尚无审查流水记录。")
     
@@ -1191,14 +1191,12 @@ with tab_dashboard:
         
         party_stats = get_party_a_statistics(limit=10)
         if party_stats:
-            html_code = "<table class='apple-table'><thead><tr><th>甲方单位</th><th>审查次数</th><th>高风险项</th><th>中风险项</th><th>风险率</th></tr></thead><tbody>"
-            for stat in party_stats:
-                risk_rate = 0.0
-                if stat['count'] > 0:
-                    risk_rate = round(((stat['high_risks'] + stat['med_risks']) / stat['count']) * 100, 1)
-                html_code += f"<tr><td>{html.escape(stat['party_a'])}</td><td>{stat['count']}</td><td><span class='badge-high'>{stat['high_risks']}</span></td><td><span class='badge-med'>{stat['med_risks']}</span></td><td style='color:#86868b;'>{risk_rate}%</td></tr>"
-            html_code += "</tbody></table>"
-            st.markdown(html_code, unsafe_allow_html=True)
+            # 使用 st.dataframe 替代 HTML 表格，支持排序功能
+            df = pd.DataFrame(party_stats)
+            df['风险率'] = df.apply(lambda row: round(((row['high_risks'] + row['med_risks']) / row['count']) * 100, 1) if row['count'] > 0 else 0, axis=1)
+            df = df[['party_a', 'count', 'high_risks', 'med_risks', '风险率']]
+            df.columns = ['甲方单位', '审查次数', '高风险项', '中风险项', '风险率(%)']
+            st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.info("暂无甲方单位统计数据。")
     
@@ -1219,19 +1217,19 @@ with tab_dashboard:
             
             with col_fast:
                 st.markdown("<h5 style='color:#34c759; margin-top:0;'>🚀 最快审查（Top 5）</h5>", unsafe_allow_html=True)
-                html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>耗时</th><th>风险数</th></tr></thead><tbody>"
-                for act in fastest:
-                    html_code += f"<tr><td>{html.escape(act['filename'])}</td><td style='color:#34c759;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td><span class='badge-high'>高{act['risk_high']}</span> <span class='badge-med'>中{act['risk_med']}</span></td></tr>"
-                html_code += "</tbody></table>"
-                st.markdown(html_code, unsafe_allow_html=True)
+                # 使用 st.dataframe 替代 HTML 表格，支持排序功能
+                df_fast = pd.DataFrame(fastest)
+                df_fast = df_fast[['filename', 'duration_seconds', 'risk_high', 'risk_med']]
+                df_fast.columns = ['合同名称', '耗时(秒)', '高风险', '中风险']
+                st.dataframe(df_fast, use_container_width=True, hide_index=True)
             
             with col_slow:
                 st.markdown("<h5 style='color:#ff3b30; margin-top:0;'>🐌 最慢审查（Top 5）</h5>", unsafe_allow_html=True)
-                html_code = "<table class='apple-table'><thead><tr><th>合同名称</th><th>耗时</th><th>风险数</th></tr></thead><tbody>"
-                for act in slowest:
-                    html_code += f"<tr><td>{html.escape(act['filename'])}</td><td style='color:#ff3b30;'>{round(act['duration_seconds'] or 0, 1)}秒</td><td><span class='badge-high'>高{act['risk_high']}</span> <span class='badge-med'>中{act['risk_med']}</span></td></tr>"
-                html_code += "</tbody></table>"
-                st.markdown(html_code, unsafe_allow_html=True)
+                # 使用 st.dataframe 替代 HTML 表格，支持排序功能
+                df_slow = pd.DataFrame(slowest)
+                df_slow = df_slow[['filename', 'duration_seconds', 'risk_high', 'risk_med']]
+                df_slow.columns = ['合同名称', '耗时(秒)', '高风险', '中风险']
+                st.dataframe(df_slow, use_container_width=True, hide_index=True)
         else:
             st.info("暂无审查效率数据。")
 
