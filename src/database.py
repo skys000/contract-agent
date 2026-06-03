@@ -14,6 +14,15 @@ from typing import List, Dict, Any, Tuple
 # 数据库文件路径设在项目 data/ 目录下，避免和源码文件混放
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "audit.db")
 
+def _latest_rows_filter(days: int | None = None) -> str:
+    """
+    构造“同一文件名只取最新一次审查记录”的 SQL 过滤条件，可选限制统计天数。
+    """
+    date_where = ""
+    if days is not None:
+        date_where = f"WHERE created_at >= datetime('now', 'localtime', '-{int(days)} days')"
+    return f"id IN (SELECT MAX(id) FROM audit_logs {date_where} GROUP BY filename)"
+
 def get_db_connection():
     """
     建立并返回 SQLite 数据库物理连接
@@ -105,7 +114,7 @@ def insert_audit_log(filename: str, party_a: str, party_b: str, risk_high: int, 
     print(f"[Database] 审核数据记录成功，写入条目 ID: {inserted_id}")
     return inserted_id
 
-def get_kpi_metrics() -> Dict[str, Any]:
+def get_kpi_metrics(days: int | None = None) -> Dict[str, Any]:
     """
     统计看板所需的 KPI 顶栏核心数据
 
@@ -117,7 +126,7 @@ def get_kpi_metrics() -> Dict[str, Any]:
     cursor = conn.cursor()
     
     # 统一去重口径：同一文件名只取 id 最大的最新审查记录
-    latest_rows_filter = "id IN (SELECT MAX(id) FROM audit_logs GROUP BY filename)"
+    latest_rows_filter = _latest_rows_filter(days)
 
     # 统计每个合同文件的最新审查结果，避免重复测试同一文件污染看板
     cursor.execute(f"SELECT COUNT(*) as total FROM audit_logs WHERE {latest_rows_filter}")
@@ -151,7 +160,7 @@ def get_kpi_metrics() -> Dict[str, Any]:
         "average_duration": f"{round(avg_duration, 1)} 秒" if avg_duration > 0 else "0.0 秒"
     }
 
-def get_recent_activities(limit: int = 5) -> List[Dict[str, Any]]:
+def get_recent_activities(limit: int = 5, days: int | None = None) -> List[Dict[str, Any]]:
     """
     获取最近的 limit 条审核流水活动流（SRS 3.5.3 节）
 
@@ -162,10 +171,11 @@ def get_recent_activities(limit: int = 5) -> List[Dict[str, Any]]:
     cursor = conn.cursor()
     
     # 查询最近 limit 个“按文件名去重后的最新审查记录”
-    cursor.execute("""
+    latest_rows_filter = _latest_rows_filter(days)
+    cursor.execute(f"""
     SELECT id, filename, party_a, party_b, risk_count_high, risk_count_med, duration_seconds, created_at
     FROM audit_logs
-    WHERE id IN (SELECT MAX(id) FROM audit_logs GROUP BY filename)
+    WHERE {latest_rows_filter}
     ORDER BY id DESC
     LIMIT ?
     """, (limit,))
@@ -189,7 +199,7 @@ def get_recent_activities(limit: int = 5) -> List[Dict[str, Any]]:
         })
     return activities
 
-def get_monthly_risk_stats() -> Tuple[List[str], List[int], List[int]]:
+def get_monthly_risk_stats(days: int | None = None) -> Tuple[List[str], List[int], List[int]]:
     """
     统计历史趋势：按文件名或时间返回高/中风险的数据列表，用于前端柱状图展示
 
@@ -200,10 +210,11 @@ def get_monthly_risk_stats() -> Tuple[List[str], List[int], List[int]]:
     cursor = conn.cursor()
     
     # 修复图表数据不动 Bug：获取最新 10 条数据，防止始终只查前 10 条
-    cursor.execute("""
+    latest_rows_filter = _latest_rows_filter(days)
+    cursor.execute(f"""
     SELECT id, filename, risk_count_high, risk_count_med
     FROM audit_logs
-    WHERE id IN (SELECT MAX(id) FROM audit_logs GROUP BY filename)
+    WHERE {latest_rows_filter}
     ORDER BY id DESC
     LIMIT 10
     """)
@@ -227,6 +238,40 @@ def get_monthly_risk_stats() -> Tuple[List[str], List[int], List[int]]:
         med_counts.append(row["risk_count_med"])
         
     return filenames, high_counts, med_counts
+
+def get_party_a_statistics(limit: int = 10, days: int | None = None) -> List[Dict[str, Any]]:
+    """
+    按甲方单位聚合最新审查记录，供运营看板展示单位维度风险分布。
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    latest_rows_filter = _latest_rows_filter(days)
+    cursor.execute(f"""
+    SELECT
+        COALESCE(NULLIF(party_a, ''), '未知用人单位') AS party_a,
+        COUNT(*) AS audit_count,
+        SUM(risk_count_high) AS high_risks,
+        SUM(risk_count_med) AS med_risks
+    FROM audit_logs
+    WHERE {latest_rows_filter}
+    GROUP BY COALESCE(NULLIF(party_a, ''), '未知用人单位')
+    ORDER BY audit_count DESC, high_risks DESC, med_risks DESC
+    LIMIT ?
+    """, (limit,))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [
+        {
+            "party_a": row["party_a"],
+            "count": row["audit_count"],
+            "high_risks": row["high_risks"] or 0,
+            "med_risks": row["med_risks"] or 0,
+        }
+        for row in rows
+    ]
 
 def backup_database() -> str:
     """

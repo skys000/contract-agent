@@ -20,10 +20,10 @@ import unicodedata
 from dotenv import load_dotenv
 from openai import OpenAI
 
-# 将 src 目录临时加入模块查找路径~X
+# 将 src 目录临时加入模块查找路径
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from parser import extract_contract_text, desensitize_text, extract_metadata, get_last_parser_message
-from database import init_db, insert_audit_log, get_kpi_metrics, get_recent_activities, get_monthly_risk_stats, backup_database, restore_database, list_backups
+from database import init_db, insert_audit_log, get_kpi_metrics, get_recent_activities, get_monthly_risk_stats, get_party_a_statistics, backup_database, restore_database, list_backups
 from agent import build_agent_graph, _lookup_law_article_text
 from retriever import query_laws
 
@@ -1080,15 +1080,15 @@ with tab_dashboard:
         time_range = st.selectbox(
             "选择数据统计时间范围",
             ["全部时间", "最近7天", "最近30天"],
-            label_visibility="collapsed",
-            horizontal=True
+            label_visibility="collapsed"
         )
+        time_range_days = {"全部时间": None, "最近7天": 7, "最近30天": 30}[time_range]
     with col_refresh:
         if st.button("🔄 刷新数据", use_container_width=True):
             st.rerun()
     
     # 动态抓取库中最新统计
-    kpis = get_kpi_metrics()
+    kpis = get_kpi_metrics(days=time_range_days)
     
     # KPI 排布 (利用有色细线对不同卡片进行极简强调，规避大彩块)
     col1, col2, col3, col4 = st.columns(4)
@@ -1139,7 +1139,7 @@ with tab_dashboard:
             st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>📈 历史审查风险分布统计</h4>", unsafe_allow_html=True)
             
             # 抓取图表统计数据
-            filenames, highs, meds = get_monthly_risk_stats()
+            filenames, highs, meds = get_monthly_risk_stats(days=time_range_days)
             
             if filenames:
                 # 苹果风格亮色主题图表绘制
@@ -1192,7 +1192,7 @@ with tab_dashboard:
         with st.container(border=True):
             st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>📋 最新合同审查活动流列表</h4>", unsafe_allow_html=True)
             
-            activities = get_recent_activities(limit=5)
+            activities = get_recent_activities(limit=5, days=time_range_days)
             if activities:
                 # 使用 st.dataframe 替代 HTML 表格，支持排序功能
                 df = pd.DataFrame(activities)
@@ -1208,7 +1208,7 @@ with tab_dashboard:
     with st.container(border=True):
         st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>🏢 甲方单位审查统计</h4>", unsafe_allow_html=True)
         
-        party_stats = get_party_a_statistics(limit=10)
+        party_stats = get_party_a_statistics(limit=10, days=time_range_days)
         if party_stats:
             # 使用 st.dataframe 替代 HTML 表格，支持排序功能
             df = pd.DataFrame(party_stats)
@@ -1225,7 +1225,7 @@ with tab_dashboard:
     with st.container(border=True):
         st.markdown("<h4 style='margin-top:0; color:#1d1d1f;'>⚡ 审查效率排行榜</h4>", unsafe_allow_html=True)
         
-        activities = get_recent_activities(limit=20)
+        activities = get_recent_activities(limit=20, days=time_range_days)
         if activities:
             # 计算平均耗时，用于标记异常数据
             durations = [act['duration_seconds'] or 0 for act in activities]
