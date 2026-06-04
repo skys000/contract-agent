@@ -146,8 +146,11 @@ def _extract_risk_highlight_candidates(report_text: str) -> list[tuple[str, str]
                         continue
                     if label_pattern.search(stripped_next_line):
                         break
-                    if re.match(r"^(?:[-*]\s*)?(?:\*\*)?(风险分析|违规分析|问题分析|法律依据|建议修改后条款|修改后条款|整改建议|优化建议)(?:\*\*)?\s*[:：]", stripped_next_line):
-                        break
+                    label_match_bullet = re.match(r"^(?:[-*]\s*)?(?:\*\*)?([^*：:]+)(?:\*\*)?\s*[:：]", stripped_next_line)
+                    if label_match_bullet:
+                        next_label = label_match_bullet.group(1).strip()
+                        if "合同原文" not in next_label:
+                            break
                     following.append(stripped_next_line)
                 combined_candidate = " ".join(part for part in [inline_text.strip(), *following] if part)
                 if combined_candidate:
