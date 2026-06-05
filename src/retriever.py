@@ -439,17 +439,49 @@ def _law_source_adjustment(query_text: str, doc: LangchainDocument) -> float:
             adjustment -= 0.35
     return adjustment
 
+def _is_header_or_title_line(line: str) -> bool:
+    """
+    判断单行是否为非实质法条内容的标题、章节目名称、发布声明等。
+    """
+    line = line.strip()
+    if not line:
+        return True
+    
+    # 1. 匹配书名号开头的法规标题，例如 《计算机软件保护条例》（2013年修正）
+    if re.match(r"^《[^》]+》(?:\s*（[^）]+）)?$", line):
+        return True
+        
+    # 2. 匹配“第一章 总则” / “第三节 试用期”等章节结构标题
+    if re.match(r"^第[一二三四五六七八九十百]+[编章节分册]\s*[^\n]*$", line):
+        return True
+        
+    # 3. 匹配“中华人民共和国主席令第XX号”或“全国人民代表大会常务委员会...”及通过会议等形式化声明
+    if re.match(r"^(?:中华人民共和国主席令|.*全国人民代表大会|.*年.*月.*日.*会议通过).*$", line):
+        return True
+        
+    return False
+
+def _clean_trailing_headers(article_text: str) -> str:
+    """
+    自底向上清洗法条切片结尾夹杂的下一章/下一部法规标题或章节名称。
+    """
+    lines = article_text.splitlines()
+    while lines and _is_header_or_title_line(lines[-1]):
+        lines.pop()
+    return "\n".join(lines).strip()
+
 def _extract_article_from_law_text(text: str, article: str) -> str:
     """
     从完整法规文本中提取指定“第X条”的全文，用于将向量命中片段回填为完整法条。
     """
     # 使用条号作为起点，截取到下一条或文件末尾，尽量保持完整法条文本
-    pattern = rf"(?m)^{re.escape(article)}[　 \t][\s\S]*?(?=^{ARTICLE_PATTERN}[　 \t]|\Z)"
+    pattern = rf"(?m)^{re.escape(article)}[　 \t]*[\s\S]*?(?=^{ARTICLE_PATTERN}[　 \t]*|\Z)"
     match = re.search(pattern, text)
     if not match:
         # 如果本地原文格式不匹配，则交给调用方保留向量命中的原片段
         return ""
-    return match.group(0).strip()
+    extracted = match.group(0).strip()
+    return _clean_trailing_headers(extracted)
 
 def _canonicalize_retrieved_doc(doc: LangchainDocument, db_dir: str) -> List[Tuple[str, str]]:
     """
@@ -458,7 +490,7 @@ def _canonicalize_retrieved_doc(doc: LangchainDocument, db_dir: str) -> List[Tup
     # 取出向量库元数据中的来源文件名，用于回到 data/laws 查找原始法规文件
     source = doc.metadata.get("source", "未知法条来源")
     # 从召回片段中识别所有法条编号，并用 dict 保持去重后的原顺序
-    articles = list(dict.fromkeys(re.findall(rf"(?m)^({ARTICLE_PATTERN})[　 \t]", doc.page_content)))
+    articles = list(dict.fromkeys(re.findall(rf"(?m)^({ARTICLE_PATTERN})[　 \t]*", doc.page_content)))
     if not articles:
         # 无法识别条号时，直接返回召回片段本身
         return [(source, doc.page_content)]
@@ -483,7 +515,7 @@ def _split_law_text_by_article(text: str) -> List[str]:
     按“第X条”切分法规文本，优先保持完整法条粒度，便于后续精确引用。
     """
     # 定位所有以“第X条”开头的法条起点
-    matches = list(re.finditer(rf"(?m)^{ARTICLE_PATTERN}[　 \t]", text))
+    matches = list(re.finditer(rf"(?m)^{ARTICLE_PATTERN}[　 \t]*", text))
     if not matches:
         return []
     articles = []
@@ -492,9 +524,10 @@ def _split_law_text_by_article(text: str) -> List[str]:
         start = match.start()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         article_text = text[start:end].strip()
+        cleaned_text = _clean_trailing_headers(article_text)
         # 过滤目录、总则标题等非实体条文
-        if _is_substantive_law_chunk(article_text):
-            articles.append(article_text)
+        if _is_substantive_law_chunk(cleaned_text):
+            articles.append(cleaned_text)
     return articles
 
 def _load_law_article_documents(db_dir: str) -> List[LangchainDocument]:
