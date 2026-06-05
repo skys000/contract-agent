@@ -6,7 +6,9 @@
 
 import os
 import re
+import shutil
 import sys
+import time
 from typing import List, Tuple
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
@@ -18,6 +20,131 @@ sys.path.append(os.path.dirname(__file__))
 from parser import extract_contract_text
 
 ARTICLE_PATTERN = r"第[一二三四五六七八九十百零〇]+条"
+LAW_FILE_EXTENSIONS = (".docx", ".pdf", ".txt")
+DELETED_LAWS_FILE = ".deleted_laws.txt"
+
+def get_project_root() -> str:
+    """
+    返回项目根目录。
+    """
+    return os.path.dirname(os.path.dirname(__file__))
+
+def get_default_laws_dir() -> str:
+    """
+    返回只读基础法规库目录。
+    """
+    return os.path.join(get_project_root(), "data", "laws")
+
+def get_law_overrides_dir(laws_dir: str = "") -> str:
+    """
+    返回在线维护法规的可写覆盖目录。
+    """
+    configured_dir = os.getenv("LAW_OVERRIDES_DIR")
+    if configured_dir:
+        return os.path.abspath(configured_dir)
+    return os.path.join(get_project_root(), "law_overrides")
+
+def get_default_vector_db_dir() -> str:
+    """
+    返回项目内置 FAISS 索引目录。
+    """
+    return os.path.join(get_project_root(), "data", "faiss_index")
+
+def get_live_vector_db_dir() -> str:
+    """
+    返回在线重建后的可写 FAISS 索引目录。
+    """
+    configured_dir = os.getenv("LIVE_FAISS_INDEX_DIR")
+    if configured_dir:
+        return os.path.abspath(configured_dir)
+    return os.path.join(get_project_root(), "faiss_index_live")
+
+def get_vector_backups_dir() -> str:
+    """
+    返回在线向量索引备份目录。
+    """
+    configured_dir = os.getenv("VECTOR_BACKUPS_DIR")
+    if configured_dir:
+        return os.path.abspath(configured_dir)
+    return os.path.join(get_project_root(), "vector_backups")
+
+def get_active_vector_db_dir() -> str:
+    """
+    优先使用在线重建索引；若尚未构建，则回退到项目内置索引。
+    """
+    live_dir = get_live_vector_db_dir()
+    if (
+        os.path.exists(os.path.join(live_dir, "index.faiss"))
+        and os.path.exists(os.path.join(live_dir, "index.pkl"))
+    ):
+        return live_dir
+    return get_default_vector_db_dir()
+
+def get_deleted_law_names(laws_dir: str) -> set[str]:
+    """
+    读取在线维护产生的逻辑删除文件名集合。
+    """
+    marker_path = os.path.join(get_law_overrides_dir(laws_dir), DELETED_LAWS_FILE)
+    if not os.path.exists(marker_path):
+        return set()
+    with open(marker_path, "r", encoding="utf-8") as f:
+        return {
+            line.strip()
+            for line in f
+            if line.strip() and not line.strip().startswith("#")
+        }
+
+def _is_supported_law_file(file_name: str, file_path: str) -> bool:
+    """
+    判断文件是否为可进入 RAG 的法规源文件。
+    """
+    return (
+        os.path.isfile(file_path)
+        and not file_name.startswith(".")
+        and os.path.splitext(file_name)[1].lower() in LAW_FILE_EXTENSIONS
+    )
+
+def get_effective_law_files(laws_dir: str) -> List[Tuple[str, str, str]]:
+    """
+    合并基础法规库和在线覆盖库，返回实际参与构建/检索的法规文件。
+
+    返回元组为: (文件名, 文件路径, 来源类型)，来源类型为 base 或 override。
+    """
+    deleted_names = get_deleted_law_names(laws_dir)
+    effective_files = {}
+
+    if os.path.isdir(laws_dir):
+        for file_name in os.listdir(laws_dir):
+            file_path = os.path.join(laws_dir, file_name)
+            if _is_supported_law_file(file_name, file_path) and file_name not in deleted_names:
+                effective_files[file_name] = (file_name, file_path, "base")
+
+    overrides_dir = get_law_overrides_dir(laws_dir)
+    if os.path.isdir(overrides_dir):
+        for file_name in os.listdir(overrides_dir):
+            file_path = os.path.join(overrides_dir, file_name)
+            if _is_supported_law_file(file_name, file_path) and file_name not in deleted_names:
+                effective_files[file_name] = (file_name, file_path, "override")
+
+    return [effective_files[name] for name in sorted(effective_files)]
+
+def resolve_effective_law_file_path(laws_dir: str, file_name: str) -> str:
+    """
+    在合并后的有效法规库中按文件名查找实际路径。
+    """
+    for current_name, file_path, _ in get_effective_law_files(laws_dir):
+        if current_name == file_name:
+            return file_path
+    return ""
+
+def _resolve_laws_dir_for_db(db_dir: str) -> str:
+    """
+    根据索引目录推导基础法规目录，在线索引目录无法推导时回退到默认 data/laws。
+    """
+    sibling_laws_dir = os.path.join(os.path.dirname(db_dir), "laws")
+    if os.path.isdir(sibling_laws_dir):
+        return sibling_laws_dir
+    return get_default_laws_dir()
 
 def _get_embedding_model_name() -> str:
     """
@@ -335,9 +462,9 @@ def _canonicalize_retrieved_doc(doc: LangchainDocument, db_dir: str) -> List[Tup
     if not articles:
         # 无法识别条号时，直接返回召回片段本身
         return [(source, doc.page_content)]
-    # 根据 FAISS 目录反推 laws 目录位置
-    laws_dir = os.path.join(os.path.dirname(db_dir), "laws")
-    file_path = os.path.join(laws_dir, source)
+    # 根据 FAISS 目录定位有效法规库；在线索引目录会回退到默认基础库和覆盖库合并视图
+    laws_dir = _resolve_laws_dir_for_db(db_dir)
+    file_path = resolve_effective_law_file_path(laws_dir, source)
     if not os.path.isfile(file_path):
         # 找不到原始法规文件时保留向量库内容，保证系统仍可返回依据
         return [(source, doc.page_content)]
@@ -374,20 +501,12 @@ def _load_law_article_documents(db_dir: str) -> List[LangchainDocument]:
     """
     从本地 laws 目录加载完整法条文档，作为向量召回之外的词面补充召回池。
     """
-    # 根据 FAISS 索引目录定位同级 laws 目录
-    laws_dir = os.path.join(os.path.dirname(db_dir), "laws")
+    # 根据 FAISS 索引目录定位有效法规库
+    laws_dir = _resolve_laws_dir_for_db(db_dir)
     law_documents = []
-    if not os.path.isdir(laws_dir):
+    if not os.path.isdir(laws_dir) and not os.path.isdir(get_law_overrides_dir(laws_dir)):
         return law_documents
-    for file_name in os.listdir(laws_dir):
-        file_path = os.path.join(laws_dir, file_name)
-        # 跳过目录、隐藏文件和非文件项
-        if not os.path.isfile(file_path) or file_name.startswith("."):
-            continue
-        file_ext = os.path.splitext(file_name)[1].lower()
-        # 仅加载当前解析器支持的法规格式
-        if file_ext not in [".docx", ".pdf", ".txt"]:
-            continue
+    for file_name, file_path, _ in get_effective_law_files(laws_dir):
         # 法规文件使用 legacy 解析，避免 MinerU 增强解析影响法库构建速度
         text_content = extract_contract_text(file_path)
         article_texts = _split_law_text_by_article(text_content)
@@ -433,17 +552,18 @@ def _is_relevant_law_chunk(query_text: str, doc: LangchainDocument) -> bool:
         return False
     # 专项法规的显式法名查询必须对应到正确来源文件，避免跨法误召回
     source_filters = [
-        ("社会保险法", "社会保险法"),
-        ("工伤保险条例", "工伤保险条例"),
-        ("女职工劳动保护特别规定", "女职工劳动保护特别规定"),
-        ("职工带薪年休假条例", "职工带薪年休假条例"),
-        ("专利法", "知识产权法"),
-        ("著作权法", "知识产权法"),
-        ("计算机软件保护条例", "知识产权法"),
+        ("社会保险法", ["社会保险法"]),
+        ("工伤保险条例", ["工伤保险条例"]),
+        ("女职工劳动保护特别规定", ["女职工劳动保护特别规定"]),
+        ("职工带薪年休假条例", ["职工带薪年休假条例"]),
+        ("专利法", ["知识产权法", "专利法"]),
+        ("著作权法", ["知识产权法", "著作权法"]),
+        ("计算机软件保护条例", ["知识产权法", "计算机软件保护条例"]),
     ]
-    for query_law_name, source_law_name in source_filters:
-        if query_law_name in compact_query and source_law_name not in source:
-            return False
+    for query_law_name, allowed_sources in source_filters:
+        if query_law_name in compact_query:
+            if not any(allowed in source for allowed in allowed_sources):
+                return False
     # query 明确指定条号时，候选法条必须包含对应条号
     if target_articles and not any(article in compact_text for article in target_articles):
         return False
@@ -472,50 +592,43 @@ def build_law_vector_db(laws_dir: str, save_dir: str) -> None:
     """
     raw_documents: List[LangchainDocument] = []
     
-    if not os.path.exists(laws_dir):
+    if not os.path.exists(laws_dir) and not os.path.isdir(get_law_overrides_dir(laws_dir)):
         raise FileNotFoundError(f"法律法规源目录不存在: {laws_dir}")
         
     print(f"[RAG] 开始扫描法条目录: {laws_dir}...")
     
-    # 1. 遍历 laws_dir 目录下的所有文件并解析
-    for file_name in os.listdir(laws_dir):
-        file_path = os.path.join(laws_dir, file_name)
-        # 仅处理文件，跳过目录或隐藏文件
-        if not os.path.isfile(file_path) or file_name.startswith("."):
-            continue
-            
-        file_ext = os.path.splitext(file_name)[1].lower()
-        if file_ext in [".docx", ".pdf", ".txt"]:
-            print(f"[RAG] 正在解析法条文件: {file_name}...")
-            try:
-                # 调用 parser.py 中的高鲁棒分流提取逻辑
-                text_content = extract_contract_text(file_path)
-                
-                # 如果是空白文件则跳过
-                if not text_content.strip():
-                    continue
-                    
-                # 优先按完整法条切分，保证后续审查报告引用的依据可读、可核验
-                article_texts = _split_law_text_by_article(text_content)
-                if article_texts:
-                    for article_text in article_texts:
-                        # 每条法条独立入库，并保留来源文件名
-                        raw_documents.append(
-                            LangchainDocument(
-                                page_content=article_text,
-                                metadata={"source": file_name}
-                            )
-                        )
-                else:
-                    # 无法按条号切分时，将整篇文本作为一个文档兜底
+    # 1. 遍历基础法规库和在线覆盖库合并后的有效文件并解析
+    for file_name, file_path, _ in get_effective_law_files(laws_dir):
+        print(f"[RAG] 正在解析法条文件: {file_name}...")
+        try:
+            # 调用 parser.py 中的高鲁棒分流提取逻辑
+            text_content = extract_contract_text(file_path)
+
+            # 如果是空白文件则跳过
+            if not text_content.strip():
+                continue
+
+            # 优先按完整法条切分，保证后续审查报告引用的依据可读、可核验
+            article_texts = _split_law_text_by_article(text_content)
+            if article_texts:
+                for article_text in article_texts:
+                    # 每条法条独立入库，并保留来源文件名
                     raw_documents.append(
                         LangchainDocument(
-                            page_content=text_content,
+                            page_content=article_text,
                             metadata={"source": file_name}
                         )
                     )
-            except Exception as e:
-                print(f"[RAG 警告] 解析文件 {file_name} 时出错: {e}，已跳过。")
+            else:
+                # 无法按条号切分时，将整篇文本作为一个文档兜底
+                raw_documents.append(
+                    LangchainDocument(
+                        page_content=text_content,
+                        metadata={"source": file_name}
+                    )
+                )
+        except Exception as e:
+            print(f"[RAG 警告] 解析文件 {file_name} 时出错: {e}，已跳过。")
                 
     if not raw_documents:
         # 未解析到任何法规时直接中断，避免构建空 FAISS 索引
@@ -556,6 +669,43 @@ def build_law_vector_db(laws_dir: str, save_dir: str) -> None:
     os.makedirs(save_dir, exist_ok=True)
     db.save_local(save_dir)
     print(f"[RAG] 向量数据库构建并持久化成功！已保存至: {save_dir}")
+
+def rebuild_law_vector_db(laws_dir: str, save_dir: str) -> str:
+    """
+    在线重建 FAISS 向量库。
+
+    新索引先写入临时目录，构建成功后再替换线上索引；若替换失败会尽量恢复旧索引。
+    :return: 旧索引备份目录，首次构建时为空字符串。
+    """
+    timestamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{int((time.time() % 1) * 1000):03d}"
+    temp_dir = f"{save_dir}.tmp_{timestamp}"
+    backup_dir = os.path.join(
+        get_vector_backups_dir(),
+        f"{os.path.basename(save_dir)}.backup_{timestamp}"
+    )
+    old_index_moved = False
+
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+
+    try:
+        build_law_vector_db(laws_dir, temp_dir)
+
+        if os.path.exists(save_dir):
+            os.makedirs(os.path.dirname(backup_dir), exist_ok=True)
+            os.rename(save_dir, backup_dir)
+            old_index_moved = True
+
+        os.rename(temp_dir, save_dir)
+        print(f"[RAG] 在线重建完成，当前索引目录: {save_dir}")
+        return backup_dir if old_index_moved else ""
+    except Exception:
+        if old_index_moved and not os.path.exists(save_dir) and os.path.exists(backup_dir):
+            os.rename(backup_dir, save_dir)
+        raise
+    finally:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 def query_laws(query: str, db_dir: str, top_k: int = 5) -> str:
     """
