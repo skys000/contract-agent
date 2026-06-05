@@ -14,7 +14,7 @@ from langgraph.graph import StateGraph, END
 
 # 将当前目录加入查找路径，确保正确引入 retriever 模块
 sys.path.append(os.path.dirname(__file__))
-from retriever import query_laws
+from retriever import get_active_vector_db_dir, get_effective_law_files, query_laws
 from parser import extract_contract_text
 
 MAX_REFLECTION_ROUNDS = 5
@@ -248,11 +248,7 @@ def _lookup_law_article_text(law_name: str, article: str) -> tuple[str, str]:
     if not os.path.isdir(laws_dir):
         return "", ""
     candidates = []
-    for file_name in os.listdir(laws_dir):
-        file_path = os.path.join(laws_dir, file_name)
-        # 只扫描当前解析器支持的法规文件
-        if not os.path.isfile(file_path) or os.path.splitext(file_name)[1].lower() not in [".docx", ".pdf", ".txt"]:
-            continue
+    for file_name, file_path, _ in get_effective_law_files(laws_dir):
         # 将文件名归一化后与报告引用法名比较
         normalized_source = _normalize_law_name(file_name)
         if law_name == normalized_source or law_name in normalized_source or normalized_source in law_name:
@@ -444,7 +440,7 @@ def auditor_node(state: AgentState) -> Dict[str, Any]:
     retrieved_laws = state.get("retrieved_laws", "")
     if not retrieved_laws:
         # 本地 FAISS 向量库路径
-        db_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "faiss_index")
+        db_dir = get_active_vector_db_dir()
         try:
             # 以合同原文作为 Query 检索最相关的劳动法规
             retrieved_laws = query_laws(state["contract_text"], db_dir, top_k=10)

@@ -10,6 +10,7 @@ import streamlit as st
 import os
 import sys
 import re
+import shutil
 import time
 import matplotlib.pyplot as plt
 import numpy as np
@@ -25,7 +26,16 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from parser import extract_contract_text, desensitize_text, extract_metadata, get_last_parser_message
 from database import init_db, insert_audit_log, get_kpi_metrics, get_recent_activities, get_monthly_risk_stats, get_party_a_statistics, backup_database, restore_database, list_backups
 from agent import build_agent_graph, _lookup_law_article_text
-from retriever import query_laws
+from retriever import (
+    DELETED_LAWS_FILE,
+    get_active_vector_db_dir,
+    get_effective_law_files,
+    get_law_overrides_dir,
+    get_live_vector_db_dir,
+    query_laws,
+    rebuild_law_vector_db,
+    resolve_effective_law_file_path
+)
 
 def count_risk_items(report_text: str, level: str) -> int:
     """
@@ -265,6 +275,207 @@ def render_contract_preview(contract_text: str, report_text: str = "") -> None:
         legend = f"<div class='risk-legend'>{''.join(legend_items)}</div>"
     # 使用 unsafe_allow_html 渲染自定义高亮样式，合同内容本身已通过 html.escape 转义
     st.markdown(f"{legend}<div class='contract-preview'>{''.join(pieces)}</div>", unsafe_allow_html=True)
+
+LAW_FILE_EXTENSIONS = (".txt", ".docx", ".pdf")
+
+def _format_file_size(size_bytes: int) -> str:
+    """
+    将文件大小格式化为前端可读文本。
+    """
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+def _list_law_files(laws_dir: str) -> list[str]:
+    """
+    列出当前可进入 RAG 构建流程的法规文件。
+    """
+    return [file_name for file_name, _, _ in get_effective_law_files(laws_dir)]
+
+def _build_law_file_records(laws_dir: str) -> list[dict[str, str]]:
+    """
+    生成法条文件清单表格数据。
+    """
+    records = []
+    for file_name, file_path, source_type in get_effective_law_files(laws_dir):
+        stat = os.stat(file_path)
+        records.append({
+            "文件名": file_name,
+            "类型": os.path.splitext(file_name)[1].lower(),
+            "来源": "在线覆盖/新增" if source_type == "override" else "基础库",
+            "大小": _format_file_size(stat.st_size),
+            "更新时间": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime))
+        })
+    return records
+
+def _safe_law_file_name(file_name: str) -> str:
+    """
+    清洗用户输入或上传得到的法规文件名，防止路径穿越和非法扩展名。
+    """
+    base_name = os.path.basename((file_name or "").strip())
+    base_name = re.sub(r'[\\/:*?"<>|]+', "_", base_name)
+    root, ext = os.path.splitext(base_name)
+    ext = ext.lower()
+    root = root.strip(" .")
+    if not root:
+        raise ValueError("文件名不能为空。")
+    if ext not in LAW_FILE_EXTENSIONS:
+        raise ValueError("法规文件仅支持 .txt、.docx、.pdf 格式。")
+    return f"{root}{ext}"
+
+def _safe_new_law_text_file_name(file_name: str) -> str:
+    """
+    新增在线文本法条时，默认补齐 .txt 扩展名。
+    """
+    normalized_name = (file_name or "").strip()
+    if normalized_name and not os.path.splitext(normalized_name)[1]:
+        normalized_name = f"{normalized_name}.txt"
+    safe_name = _safe_law_file_name(normalized_name)
+    if not safe_name.lower().endswith(".txt"):
+        raise ValueError("在线新建法条仅支持 .txt 文本文件。")
+    return safe_name
+
+def _resolve_law_file_path(laws_dir: str, file_name: str) -> str:
+    """
+    将法规文件名解析到合并后的有效法规库路径。
+    """
+    safe_name = _safe_law_file_name(file_name)
+    file_path = resolve_effective_law_file_path(laws_dir, safe_name)
+    if not file_path:
+        raise FileNotFoundError(f"未找到法规文件: {safe_name}")
+    return file_path
+
+def _resolve_law_write_path(laws_dir: str, file_name: str) -> str:
+    """
+    将在线新增、上传、编辑的法规文件解析到可写覆盖目录。
+    """
+    safe_name = _safe_law_file_name(file_name)
+    write_dir = get_law_overrides_dir(laws_dir)
+    os.makedirs(write_dir, exist_ok=True)
+    base_dir = os.path.abspath(write_dir)
+    file_path = os.path.abspath(os.path.join(base_dir, safe_name))
+    if not file_path.startswith(base_dir + os.sep):
+        raise ValueError("非法法规文件路径。")
+    return file_path
+
+def _get_deleted_laws_marker_path(laws_dir: str) -> str:
+    """
+    返回在线逻辑删除标记文件路径。
+    """
+    overrides_dir = get_law_overrides_dir(laws_dir)
+    os.makedirs(overrides_dir, exist_ok=True)
+    return os.path.join(overrides_dir, DELETED_LAWS_FILE)
+
+def _read_deleted_law_names(laws_dir: str) -> set[str]:
+    """
+    读取在线逻辑删除的法规文件名。
+    """
+    marker_path = _get_deleted_laws_marker_path(laws_dir)
+    if not os.path.exists(marker_path):
+        return set()
+    with open(marker_path, "r", encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip() and not line.strip().startswith("#")}
+
+def _write_deleted_law_names(laws_dir: str, deleted_names: set[str]) -> None:
+    """
+    写回在线逻辑删除的法规文件名。
+    """
+    marker_path = _get_deleted_laws_marker_path(laws_dir)
+    with open(marker_path, "w", encoding="utf-8", newline="\n") as f:
+        for file_name in sorted(deleted_names):
+            f.write(f"{file_name}\n")
+
+def _mark_law_deleted(laws_dir: str, file_name: str) -> None:
+    """
+    逻辑删除一个法规文件。
+    """
+    safe_name = _safe_law_file_name(file_name)
+    deleted_names = _read_deleted_law_names(laws_dir)
+    deleted_names.add(safe_name)
+    _write_deleted_law_names(laws_dir, deleted_names)
+
+def _unmark_law_deleted(laws_dir: str, file_name: str) -> None:
+    """
+    取消法规文件的逻辑删除状态。
+    """
+    safe_name = _safe_law_file_name(file_name)
+    deleted_names = _read_deleted_law_names(laws_dir)
+    if safe_name in deleted_names:
+        deleted_names.remove(safe_name)
+        _write_deleted_law_names(laws_dir, deleted_names)
+
+def _read_law_text_file(file_path: str) -> str:
+    """
+    读取 .txt 法条正文，兼容常见中文编码。
+    """
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            with open(file_path, "r", encoding=encoding) as f:
+                return f.read()
+        except UnicodeDecodeError:
+            continue
+    raise UnicodeDecodeError("unknown", b"", 0, 1, "无法识别文本编码")
+
+def _write_law_text_file(file_path: str, content: str) -> None:
+    """
+    以 UTF-8 写回在线编辑后的法条正文。
+    """
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write((content or "").replace("\r\n", "\n"))
+
+def _backup_law_file(file_path: str, laws_dir: str) -> str:
+    """
+    修改或删除法规文件前保存一份本地备份。
+    """
+    timestamp = f"{time.strftime('%Y%m%d_%H%M%S')}_{int((time.time() % 1) * 1000):03d}"
+    backup_dir = os.path.join(os.path.dirname(__file__), "law_backups", timestamp)
+    os.makedirs(backup_dir, exist_ok=True)
+    backup_path = os.path.join(backup_dir, os.path.basename(file_path))
+    shutil.copy2(file_path, backup_path)
+    return backup_path
+
+def _load_law_preview(file_path: str) -> str:
+    """
+    载入法规预览文本，Word/PDF 使用现有轻量解析器。
+    """
+    if os.path.splitext(file_path)[1].lower() == ".txt":
+        return _read_law_text_file(file_path)
+    return extract_contract_text(file_path, prefer_mineru=False)
+
+def _get_vector_index_status(db_dir: str) -> dict[str, str]:
+    """
+    获取当前 FAISS 索引文件状态。
+    """
+    index_files = [
+        os.path.join(db_dir, "index.faiss"),
+        os.path.join(db_dir, "index.pkl")
+    ]
+    existing_files = [path for path in index_files if os.path.exists(path)]
+    if len(existing_files) != len(index_files):
+        return {"状态": "未构建", "更新时间": "-", "大小": "-"}
+    latest_mtime = max(os.path.getmtime(path) for path in existing_files)
+    total_size = sum(os.path.getsize(path) for path in existing_files)
+    return {
+        "状态": "已构建",
+        "更新时间": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(latest_mtime)),
+        "大小": _format_file_size(total_size)
+    }
+
+def _format_rebuild_error(error: Exception) -> str:
+    """
+    将向量库重建异常转为更明确的前端提示。
+    """
+    message = str(error)
+    if "Connection error" in message or "APIConnectionError" in message:
+        return (
+            "重建失败：向量模型接口连接失败。请确认当前运行 Streamlit 的终端/环境允许访问 "
+            f"`{html.escape(os.getenv('BASE_URL', 'BASE_URL 未配置'))}` 的 `/embeddings` POST 请求，"
+            "并检查 API_KEY、BASE_URL、EMBEDDING_MODEL_NAME 配置。"
+        )
+    return f"重建失败：{message}"
 
 def _get_llm_client() -> OpenAI:
     """
@@ -742,8 +953,8 @@ with tab_audit:
             st.session_state["parsed_contract"] = None
 
         if st.session_state["parsed_contract"] is None:
-            # MinerU CLI 只接受真实文件路径，因此先将上传内容落到 data/temp，再在 finally 中清理。
-            temp_dir = os.path.join(os.path.dirname(__file__), "data", "temp")
+            # MinerU CLI 只接受真实文件路径，因此先将上传内容落到可写运行时目录，再在 finally 中清理。
+            temp_dir = os.path.join(os.path.dirname(__file__), "runtime_temp")
             os.makedirs(temp_dir, exist_ok=True)
             temp_path = os.path.join(temp_dir, uploaded_file.name)
 
@@ -863,7 +1074,7 @@ with tab_audit:
                             "<div style='color:#0071e3; font-size:13px; margin: 10px 0;'>🔍 [1/4] 正在从本地 FAISS 法律知识库召回相关劳动法条规约...</div>", 
                             unsafe_allow_html=True
                         )
-                        db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
+                        db_dir = get_active_vector_db_dir()
                         try:
                             # 将完整的合同文本传入，底层机制已重构为段落切分、多路召回与合并去重
                             retrieved_laws = query_laws(clean_text, db_dir, top_k=10)
@@ -1041,7 +1252,7 @@ with tab_consult:
                 st.session_state["consult_current_first_answer"] = first_answer
 
                 st.write("2/3 正在按法名和条号精确查找本地法条，必要时回退到 FAISS 语义检索...")
-                db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
+                db_dir = get_active_vector_db_dir()
                 # 第二步回到本地法条库检索，避免最终答复只依赖模型记忆
                 local_laws = _lookup_local_laws_for_consultation(first_answer, consult_question, db_dir)
                 st.session_state["consult_current_local_laws"] = local_laws
@@ -1303,20 +1514,244 @@ with tab_dashboard:
 # ------------------------------------------
 with tab_library:
     st.markdown("<br>", unsafe_allow_html=True)
-    
-    # 扫描 laws 目录
+
+    st.markdown("### 🧱 法条库维护与向量知识库重建")
     laws_dir = os.path.join(os.path.dirname(__file__), "data", "laws")
-    if os.path.exists(laws_dir):
-        # 只展示当前系统支持解析并可进入 RAG 的法规文件类型
-        law_files = [f for f in os.listdir(laws_dir) if f.endswith((".docx", ".pdf", ".txt"))]
-        if law_files:
-            with st.container(border=True):
-                st.markdown("<h5 style='margin-top:0; color:#1d1d1f;'>📂 已成功加载的法律与司法解释文本（本地 RAG 数据源）</h5>", unsafe_allow_html=True)
-                for name in law_files:
-                    st.markdown(f"- 📄 `{name}`")
+    db_dir = get_active_vector_db_dir()
+    rebuild_db_dir = get_live_vector_db_dir()
+    os.makedirs(get_law_overrides_dir(laws_dir), exist_ok=True)
+    law_files = _list_law_files(laws_dir)
+    txt_law_files = [file_name for file_name in law_files if file_name.lower().endswith(".txt")]
+
+    notice = st.session_state.pop("law_admin_notice", None)
+    if notice:
+        getattr(st, notice["level"])(notice["message"])
+
+    st.markdown(
+        "<div style='font-size:13px; color:#86868b; margin-bottom:16px;'>"
+        "系统会读取 `data/laws/` 基础法规库，并将在线新增、上传、编辑内容保存到可写的 `law_overrides/` 覆盖库。"
+        "审计工作区与法律咨询助手会使用最新重建后的索引进行法条召回。"
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    admin_left, admin_right = st.columns([1.25, 0.85])
+
+    with admin_left:
+        with st.container(border=True):
+            st.markdown("<h5 style='margin-top:0; color:#1d1d1f;'>✏️ 在线调整文本法条</h5>", unsafe_allow_html=True)
+            edit_mode = st.radio(
+                "维护模式",
+                ["编辑已有 .txt 法条", "新增 .txt 法条"],
+                horizontal=True,
+                key="law_editor_mode"
+            )
+
+            if edit_mode == "编辑已有 .txt 法条":
+                if txt_law_files:
+                    selected_txt_file = st.selectbox(
+                        "选择可编辑文本法条",
+                        txt_law_files,
+                        key="law_edit_select"
+                    )
+                    selected_txt_path = _resolve_law_file_path(laws_dir, selected_txt_file)
+                    editor_key = f"law_editor_text::{selected_txt_file}"
+                    reload_flag_key = f"{editor_key}::reload_requested"
+                    if st.session_state.pop(reload_flag_key, False) or editor_key not in st.session_state:
+                        st.session_state[editor_key] = _read_law_text_file(selected_txt_path)
+
+                    st.text_area(
+                        "法条正文",
+                        height=420,
+                        key=editor_key
+                    )
+
+                    save_col, reload_col = st.columns(2)
+                    with save_col:
+                        if st.button("💾 保存法条修改", use_container_width=True, key="save_law_text"):
+                            try:
+                                if not st.session_state[editor_key].strip():
+                                    st.warning("法条正文不能为空。")
+                                else:
+                                    target_txt_path = _resolve_law_write_path(laws_dir, selected_txt_file)
+                                    _backup_law_file(selected_txt_path, laws_dir)
+                                    _write_law_text_file(target_txt_path, st.session_state[editor_key])
+                                    _unmark_law_deleted(laws_dir, selected_txt_file)
+                                    st.success("法条已保存到在线覆盖库。请点击右侧重建按钮刷新向量知识库。")
+                            except Exception as ex:
+                                st.error(f"保存失败：{ex}")
+                    with reload_col:
+                        if st.button("↩️ 重新载入磁盘内容", use_container_width=True, key="reload_law_text"):
+                            st.session_state[reload_flag_key] = True
+                            st.rerun()
+                else:
+                    st.info("当前还没有可在线编辑的 .txt 法条文件，可先新增文本法条或上传法规文件。")
+            else:
+                new_law_name = st.text_input(
+                    "新法条文件名",
+                    placeholder="例如：劳动合同法_补充条文.txt",
+                    key="new_law_file_name"
+                )
+                new_law_text = st.text_area(
+                    "新法条正文",
+                    height=420,
+                    key="new_law_text"
+                )
+                if st.button("➕ 创建文本法条", use_container_width=True, key="create_law_text"):
+                    try:
+                        safe_name = _safe_new_law_text_file_name(new_law_name)
+                        target_path = _resolve_law_write_path(laws_dir, safe_name)
+                        if safe_name in law_files:
+                            st.error("同名法规文件已存在，请改名或切换到编辑模式。")
+                        elif not new_law_text.strip():
+                            st.warning("法条正文不能为空。")
+                        else:
+                            _write_law_text_file(target_path, new_law_text)
+                            _unmark_law_deleted(laws_dir, safe_name)
+                            st.session_state["law_admin_notice"] = {
+                                "level": "success",
+                                "message": f"已创建 `{safe_name}`。请重建向量知识库后再进行检索验证。"
+                            }
+                            st.rerun()
+                    except Exception as ex:
+                        st.error(f"创建失败：{ex}")
+
+    with admin_right:
+        with st.container(border=True):
+            st.markdown("<h5 style='margin-top:0; color:#1d1d1f;'>🔁 向量知识库重建</h5>", unsafe_allow_html=True)
+            index_status = _get_vector_index_status(db_dir)
+            status_col, file_col = st.columns(2)
+            with status_col:
+                st.metric("索引状态", index_status["状态"])
+            with file_col:
+                st.metric("法规文件", f"{len(law_files)} 个")
+            st.caption(f"索引更新时间：{index_status['更新时间']} ｜ 索引大小：{index_status['大小']}")
+
+            missing_embedding_config = [
+                name for name in ["API_KEY", "BASE_URL", "EMBEDDING_MODEL_NAME"]
+                if not os.getenv(name)
+            ]
+            if missing_embedding_config:
+                st.warning(f"当前缺少向量模型配置：{', '.join(missing_embedding_config)}。重建前请先检查 .env。")
+
+            if st.button("🔁 重新构建向量知识库", use_container_width=True, key="rebuild_law_vector_db"):
+                if not law_files:
+                    st.warning("法规目录为空，无法构建向量知识库。")
+                else:
+                    try:
+                        with st.status("正在重建向量知识库...", expanded=True) as status:
+                            st.write("正在解析基础法规库与在线覆盖库中的法规源文件...")
+                            st.write("正在调用向量模型生成法条 embedding 并写入临时索引...")
+                            backup_dir = rebuild_law_vector_db(laws_dir, rebuild_db_dir)
+                            status.update(label="向量知识库重建完成", state="complete", expanded=False)
+                        rebuilt_status = _get_vector_index_status(rebuild_db_dir)
+                        backup_note = f"旧索引备份：`{backup_dir}`" if backup_dir else "本次为首次构建，无旧索引备份。"
+                        st.success(
+                            f"重建成功。当前索引更新时间：{rebuilt_status['更新时间']}。{backup_note} "
+                            "页面上方的索引状态和检索器会在刷新页面后显示最新结果。"
+                        )
+                        if st.button("🔄 刷新页面状态", use_container_width=True, key="refresh_after_rebuild"):
+                            st.rerun()
+                    except Exception as ex:
+                        st.error(_format_rebuild_error(ex))
+
+        with st.container(border=True):
+            st.markdown("<h5 style='margin-top:0; color:#1d1d1f;'>📤 上传或替换法规文件</h5>", unsafe_allow_html=True)
+            uploaded_law_file = st.file_uploader(
+                "支持 .txt、.docx、.pdf",
+                type=["txt", "docx", "pdf"],
+                key="law_library_upload"
+            )
+            allow_overwrite = st.checkbox("允许覆盖同名文件", key="allow_overwrite_law_file")
+            if st.button(
+                "📤 保存上传文件",
+                use_container_width=True,
+                disabled=uploaded_law_file is None,
+                key="save_uploaded_law_file"
+            ):
+                try:
+                    safe_upload_name = _safe_law_file_name(uploaded_law_file.name)
+                    target_path = _resolve_law_write_path(laws_dir, safe_upload_name)
+                    existing_path = resolve_effective_law_file_path(laws_dir, safe_upload_name)
+                    if existing_path and not allow_overwrite:
+                        st.warning("同名法规文件已存在。如需替换，请勾选“允许覆盖同名文件”。")
+                    else:
+                        if existing_path:
+                            _backup_law_file(existing_path, laws_dir)
+                        with open(target_path, "wb") as f:
+                            f.write(uploaded_law_file.getvalue())
+                        _unmark_law_deleted(laws_dir, safe_upload_name)
+                        st.session_state["law_admin_notice"] = {
+                            "level": "success",
+                            "message": f"已保存 `{safe_upload_name}`。请重建向量知识库后再进行检索验证。"
+                        }
+                        st.rerun()
+                except Exception as ex:
+                    st.error(f"上传保存失败：{ex}")
+
+        with st.container(border=True):
+            st.markdown("<h5 style='margin-top:0; color:#1d1d1f;'>🗑️ 移除法规源文件</h5>", unsafe_allow_html=True)
+            if law_files:
+                delete_target = st.selectbox(
+                    "选择要移除的法规文件",
+                    [""] + law_files,
+                    format_func=lambda name: "请选择法规文件" if not name else name,
+                    key="delete_law_file_select"
+                )
+                confirm_delete = st.checkbox("我确认移除该法规源文件", key="confirm_delete_law_file")
+                if st.button(
+                    "🗑️ 删除所选法规文件",
+                    use_container_width=True,
+                    disabled=not delete_target or not confirm_delete,
+                    key="delete_law_file"
+                ):
+                    try:
+                        delete_path = _resolve_law_file_path(laws_dir, delete_target)
+                        backup_path = _backup_law_file(delete_path, laws_dir)
+                        override_delete_path = _resolve_law_write_path(laws_dir, delete_target)
+                        if os.path.exists(override_delete_path):
+                            os.remove(override_delete_path)
+                        base_delete_path = os.path.abspath(os.path.join(laws_dir, _safe_law_file_name(delete_target)))
+                        if os.path.exists(base_delete_path):
+                            _mark_law_deleted(laws_dir, delete_target)
+                        st.session_state["law_admin_notice"] = {
+                            "level": "success",
+                            "message": f"已删除 `{delete_target}`，删除前备份位于 `{backup_path}`。请重建向量知识库。"
+                        }
+                        st.rerun()
+                    except Exception as ex:
+                        st.error(f"删除失败：{ex}")
+            else:
+                st.info("暂无可移除的法规文件。")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.markdown("<h5 style='margin-top:0; color:#1d1d1f;'>📂 已加载的法律与司法解释文本（本地 RAG 数据源）</h5>", unsafe_allow_html=True)
+        law_records = _build_law_file_records(laws_dir)
+        if law_records:
+            st.dataframe(pd.DataFrame(law_records), use_container_width=True, hide_index=True)
         else:
-            st.warning("法律法规目录为空，请将参考法条放入 data/laws/ 目录。")
-            
+            st.warning("法律法规目录为空，请上传或新建参考法条。")
+
+    if law_files:
+        with st.expander("查看法规原文预览", expanded=False):
+            preview_file = st.selectbox("选择预览文件", law_files, key="law_preview_select")
+            try:
+                preview_path = _resolve_law_file_path(laws_dir, preview_file)
+                preview_text = _load_law_preview(preview_path)
+                preview_truncated = preview_text[:20000]
+                st.text_area(
+                    "预览内容",
+                    value=preview_truncated,
+                    height=360,
+                    disabled=True,
+                    key=f"law_preview_text::{preview_file}"
+                )
+                if len(preview_text) > len(preview_truncated):
+                    st.caption("预览内容较长，已截取前 20000 个字符。")
+            except Exception as ex:
+                st.error(f"预览失败：{ex}")
+
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("### 🔍 法律法规语义检索比对器")
     st.markdown(
@@ -1334,7 +1769,6 @@ with tab_library:
     )
     
     if law_query:
-        db_dir = os.path.join(os.path.dirname(__file__), "data", "faiss_index")
         with st.spinner("正在语义计算并召回相关法条..."):
             try:
                 # 法条文库页用于人工验证 RAG 命中效果，因此固定展示 Top 5 结果

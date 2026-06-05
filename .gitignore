@@ -13,3 +13,9 @@ db/
 data/*.db
 data/temp/
 data/mineru_output/
+law_overrides/
+law_backups/
+faiss_index_live/
+vector_backups/
+data/backups/
+.vscode/settings.json
